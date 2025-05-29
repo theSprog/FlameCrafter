@@ -876,6 +876,8 @@ class HtmlFlameGraphRenderer : public FlameGraphRenderer {
 // 🔥 ===== SVG火焰图渲染器  =====
 class SvgFlameGraphRenderer : public FlameGraphRenderer {
   private:
+#include "flamegraph_js_embed.hpp" // FLAMEGRAPH_JS 变量可用
+
     std::ostringstream svg_content_;
     std::unique_ptr<ColorScheme> color_scheme_;
     size_t total_samples_ = 0;

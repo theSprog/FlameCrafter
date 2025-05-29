@@ -37,21 +37,25 @@ perf-small: $(TARGET)
 	@echo "🔥 Small performance test (1K samples)..."
 	python3 generate_test_data.py --small
 	@time ./$(TARGET) small_test.txt small_flamegraph.html 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) small_test.txt small_flamegraph.svg 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
 
 perf-medium: $(TARGET)
 	@echo "🔥 Medium performance test (10K samples)..."
 	python3 generate_test_data.py --medium
 	@time ./$(TARGET) medium_test.txt medium_flamegraph.html 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) medium_test.txt medium_flamegraph.svg 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
 
 perf-large: $(TARGET)
 	@echo "🔥 Large performance test (100K samples)..."
 	python3 generate_test_data.py --large
 	@time ./$(TARGET) large_test.txt large_flamegraph.html 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) large_test.txt large_flamegraph.svg 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
 
 perf-huge: $(TARGET)
 	@echo "🔥 Huge performance test (1M samples)..."
 	python3 generate_test_data.py --huge
 	@time ./$(TARGET) huge_test.txt huge_flamegraph.html 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) huge_test.txt huge_flamegraph.svg 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
 
 # Run all performance tests
 perf-all: perf-small perf-medium perf-large perf-huge
