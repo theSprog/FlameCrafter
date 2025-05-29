@@ -2,6 +2,20 @@
 
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g
+# CXXFLAGS = -std=c++17 -Wall -Wextra -O0 -g -fsanitize=address,undefined,leak
+CXXFLAGS += -Werror=uninitialized \
+    -Werror=return-type \
+    -Wconversion \
+    -Wsign-compare \
+    -Werror=unused-result \
+    -Werror=suggest-override \
+    -Wzero-as-null-pointer-constant \
+    -Wmissing-declarations \
+    -Wold-style-cast \
+    -Werror=vla \
+    -Wnon-virtual-dtor \
+    -Wreturn-local-addr 
+
 TARGET = flamegraph_main
 SOURCE = example_main.cpp
 HEADER_DIR = include
@@ -34,26 +48,26 @@ clean:
 perf-small: $(TARGET)
 	@echo "🔥 Small performance test (1K samples)..."
 	python3 script/generate_test_data.py --small
-	@time ./$(TARGET) small_test.txt $(BUILD_DIR)/small_flamegraph.html 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
-	@time ./$(TARGET) small_test.txt $(BUILD_DIR)/small_flamegraph.svg 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) small_test.txt $(BUILD_DIR)/small_flamegraph.html 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) small_test.txt $(BUILD_DIR)/small_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
 
 perf-medium: $(TARGET)
 	@echo "🔥 Medium performance test (10K samples)..."
 	python3 script/generate_test_data.py --medium
-	@time ./$(TARGET) medium_test.txt $(BUILD_DIR)/medium_flamegraph.html 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
-	@time ./$(TARGET) medium_test.txt $(BUILD_DIR)/medium_flamegraph.svg 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) medium_test.txt $(BUILD_DIR)/medium_flamegraph.html 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) medium_test.txt $(BUILD_DIR)/medium_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
 
 perf-large: $(TARGET)
 	@echo "🔥 Large performance test (100K samples)..."
 	python3 script/generate_test_data.py --large
-	@time ./$(TARGET) large_test.txt $(BUILD_DIR)/large_flamegraph.html 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
-	@time ./$(TARGET) large_test.txt $(BUILD_DIR)/large_flamegraph.svg 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) large_test.txt $(BUILD_DIR)/large_flamegraph.html 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) large_test.txt $(BUILD_DIR)/large_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
 
 perf-huge: $(TARGET)
 	@echo "🔥 Huge performance test (1M samples)..."
 	python3 script/generate_test_data.py --huge
-	@time ./$(TARGET) huge_test.txt $(BUILD_DIR)/huge_flamegraph.html 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
-	@time ./$(TARGET) huge_test.txt $(BUILD_DIR)/huge_flamegraph.svg 2>/dev/null || echo "Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) huge_test.txt $(BUILD_DIR)/huge_flamegraph.html 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./$(TARGET) huge_test.txt $(BUILD_DIR)/huge_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
 
 # Run all performance tests
 perf-all: perf-small perf-medium perf-large perf-huge

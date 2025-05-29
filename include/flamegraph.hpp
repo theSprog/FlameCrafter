@@ -1,12 +1,14 @@
 #pragma once
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include <map>
@@ -38,16 +40,18 @@ class RenderException : public FlameGraphException {
 
 // 🔥 ===== 工具函数 =====
 
-namespace utils {
-inline std::string trim(const std::string& str) {
-    if (str.empty()) return str;
-    size_t start = str.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos) return "";
-    size_t end = str.find_last_not_of(" \t\r\n");
-    return str.substr(start, end - start + 1);
+namespace {
+inline std::string_view trim(std::string_view str) {
+    const auto first = str.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) {
+        return {}; // empty view
+    }
+    const auto last = str.find_last_not_of(" \t\r\n");
+    // substr(pos, len)， len=last-first+1
+    return str.substr(first, last - first + 1);
 }
 
-inline std::string read_relative_file(const std::string& filename) {
+inline std::string read_relative_file(std::string_view filename) {
     std::filesystem::path current_file(__FILE__);
     std::filesystem::path base_dir = current_file.parent_path();
     std::filesystem::path full_path = base_dir / filename;
@@ -61,30 +65,44 @@ inline std::string read_relative_file(const std::string& filename) {
     return oss.str();
 }
 
-inline std::string get_suffix(const std::string& path) {
-    std::filesystem::path p(path);
-    std::string ext = p.extension().string();
-    // ext 可能是 ".txt"
-    if (! ext.empty() && ext[0] == '.') {
-        ext.erase(0, 1); // 移除开头的点
+inline std::string_view file_suffix(std::string_view path) {
+    // 找到最后一个点
+    size_t last_dot = path.find_last_of('.');
+    if (last_dot == std::string_view::npos || last_dot == path.size() - 1) {
+        return {}; // 没有后缀
     }
-    return ext;
+
+    // 还要确保点在最后一个路径分隔符之后, 兼容 Windows 和 Unix
+    size_t last_slash = path.find_last_of("/\\");
+    if (last_slash != std::string_view::npos && last_dot < last_slash) {
+        return {};
+    }
+
+    // 返回点之后的部分
+    return path.substr(last_dot + 1);
 }
 
-inline std::vector<std::string> split(const std::string& str, char delimiter) {
-    std::vector<std::string> tokens;
-    std::istringstream iss(str);
-    std::string token;
+inline std::vector<std::string_view> split(std::string_view str, char delimiter) {
+    std::vector<std::string_view> tokens;
 
-    while (std::getline(iss, token, delimiter)) {
-        tokens.push_back(token);
+    size_t start = 0;
+    while (true) {
+        size_t end = str.find(delimiter, start);
+        if (end == std::string_view::npos) {
+            tokens.emplace_back(str.substr(start));
+            break;
+        }
+        tokens.emplace_back(str.substr(start, end - start));
+        start = end + 1;
     }
+
     return tokens;
 }
 
-inline std::string escape_xml(const std::string& str) {
+inline std::string escape_xml(std::string_view str) {
     std::string escaped;
-    escaped.reserve(str.size() * 1.2); // 预留空间
+    size_t reserve_size = str.size() + (str.size() / 5); // 预留 0.2 的空间
+    escaped.reserve(reserve_size);
 
     for (char c : str) {
         switch (c) {
@@ -111,23 +129,23 @@ inline std::string escape_xml(const std::string& str) {
     return escaped;
 }
 
-inline bool file_exists(const std::string& filename) {
+inline bool file_exists(std::string_view filename) {
     return std::filesystem::exists(filename);
 }
 
-inline uintmax_t get_file_size(const std::string& filename) {
+inline uintmax_t get_file_size(std::string_view filename) {
     if (! file_exists(filename)) return 0;
     return std::filesystem::file_size(filename);
 }
-} // namespace utils
+} // namespace
 
 // 🔥 ===== 颜色方案 =====
 
 class ColorScheme {
   public:
     virtual ~ColorScheme() = default;
-    virtual std::string get_color(const std::string& func_name, double heat_ratio = 0.0) const = 0;
-    virtual std::string get_name() const = 0;
+    virtual std::string get_color(std::string_view func_name, double heat_ratio = 0.0) const = 0;
+    virtual std::string_view get_name() const = 0;
 
     // 改进的HSL到RGB转换，支持更精确的颜色控制
     static void hsl_to_rgb(double h, double s, double l, int& r, int& g, int& b) {
@@ -156,35 +174,31 @@ class ColorScheme {
     }
 
     // 辅助函数：生成一致的随机化偏移
-    static double get_function_hash_offset(const std::string& func_name, double range = 30.0) {
-        size_t hash = std::hash<std::string>{}(func_name);
-        return ((hash % 1000) / 1000.0 - 0.5) * range; // -range/2 到 +range/2
+    static double get_function_hash_offset(std::string_view func_name, double range = 30.0) {
+        size_t hash = std::hash<std::string_view>{}(func_name);
+        // ratio ∈ [0.0, 0.999]
+        double ratio = static_cast<double>(hash % 1000) / 1000.0;
+        return (ratio - 0.5) * range; // -range/2 到 +range/2
     }
 };
 
 class ClassicHotColorScheme : public ColorScheme {
   public:
-    std::string get_color(const std::string& func_name, double heat_ratio = 0.0) const override {
-        /*
-        冷函数呈现黄绿色（90°附近）
-        中等热度呈现橙黄色（30-60°）
-        热函数呈现深红色（0°附近）
-        */
+    std::string get_color(std::string_view func_name, double heat_ratio = 0.0) const override {
         /* heat_ratio 越大 → hue 越偏红；底层帧呈黄/橙，越往上越红 */
-        double base_hue = 60.0 - 60.0 * std::clamp(heat_ratio, 0.0, 1.0); // 60°(黄) → 0°(红)
-
-        /* 给相同层级的不同函数一点抖动，避免全部纯同色 */
-        size_t h = std::hash<std::string>{}(func_name);
-        base_hue += (h & 15) * 2; // 0-30° 微抖动
-
+        double hue = 60.0 - 60.0 * std::clamp(heat_ratio, 0.0, 1.0); // 60° → 0°
+        hue += get_function_hash_offset(func_name, 30.0);
+        double saturation = 1.0;
+        double lightness = 0.5; // 中等亮度，经典高饱和色彩
         int r, g, b;
-        hsl_to_rgb(base_hue, 0.75, 0.55, r, g, b);
+        hsl_to_rgb(hue, saturation, lightness, r, g, b);
+
         std::ostringstream oss;
         oss << "rgb(" << r << ',' << g << ',' << b << ')';
         return oss.str();
     }
 
-    std::string get_name() const override {
+    std::string_view get_name() const override {
         return "hot";
     }
 };
@@ -195,8 +209,8 @@ class ColorSchemeFactory {
     // 定义一个映射表，存储可用的配色方案
     using CreatorFunc = std::function<std::unique_ptr<ColorScheme>()>;
 
-    static const std::unordered_map<std::string, CreatorFunc>& get_scheme_map() {
-        static const std::unordered_map<std::string, CreatorFunc> scheme_map = {
+    static const std::unordered_map<std::string_view, CreatorFunc>& get_scheme_map() {
+        static const std::unordered_map<std::string_view, CreatorFunc> scheme_map = {
             {"hot", []() { return std::make_unique<ClassicHotColorScheme>(); }},
             // 如果有新的 ColorScheme，继续加在这里
         };
@@ -205,7 +219,7 @@ class ColorSchemeFactory {
 
   public:
     // 创建 ColorScheme
-    static std::unique_ptr<ColorScheme> create(const std::string& scheme_name) {
+    static std::unique_ptr<ColorScheme> create(std::string_view scheme_name) {
         const auto& map = get_scheme_map();
         auto it = map.find(scheme_name);
         if (it != map.end()) {
@@ -216,8 +230,8 @@ class ColorSchemeFactory {
     }
 
     // 列出可用的配色方案
-    static std::vector<std::string> get_available_schemes() {
-        std::vector<std::string> schemes;
+    static const std::vector<std::string_view> get_available_schemes() {
+        std::vector<std::string_view> schemes;
         for (const auto& [name, _] : get_scheme_map()) {
             schemes.push_back(name);
         }
@@ -239,12 +253,12 @@ struct FlameNode {
     std::string name;
     size_t self_count = 0;
     size_t total_count = 0;
-    std::map<std::string, std::unique_ptr<FlameNode>> children;
+    std::map<std::string, std::unique_ptr<FlameNode>, std::less<>> children;
     FlameNode* parent = nullptr; // 父节点指针
 
     FlameNode() = default;
 
-    explicit FlameNode(const std::string& func_name) : name(func_name) {}
+    explicit FlameNode(std::string_view func_name) : name(func_name) {}
 
     // 禁用拷贝/移动构造函数
     FlameNode(FlameNode&& other) noexcept = delete;
@@ -252,13 +266,13 @@ struct FlameNode {
     FlameNode(const FlameNode&) = delete;
     FlameNode& operator=(const FlameNode&) = delete;
 
-    FlameNode* get_or_create_child(const std::string& child_name) {
+    FlameNode* get_or_create_child(std::string_view child_name) {
         auto it = children.find(child_name);
         if (it == children.end()) {
             auto child = std::make_unique<FlameNode>(child_name);
             FlameNode* child_ptr = child.get();
             child_ptr->parent = this; // 设置父指针
-            children[child_name] = std::move(child);
+            children[std::string(child_name)] = std::move(child);
             return child_ptr;
         }
         return it->second.get();
@@ -287,7 +301,7 @@ struct FlameNode {
     // 新增：计算热度（相对于父节点）
     double get_heat_ratio() const {
         if (! parent || parent->total_count == 0) return 0.0;
-        return std::min(1.0, static_cast<double>(total_count) / parent->total_count);
+        return std::min(1.0, static_cast<double>(total_count) / static_cast<double>(parent->total_count));
     }
 
     // 修剪树节点 - 移除小于阈值的节点
@@ -296,7 +310,7 @@ struct FlameNode {
 
         auto it = children.begin();
         while (it != children.end()) {
-            double ratio = static_cast<double>(it->second->total_count) / total_count;
+            double ratio = static_cast<double>(it->second->total_count) / static_cast<double>(total_count);
             if (ratio < threshold) {
                 it = children.erase(it);
             } else {
@@ -304,16 +318,6 @@ struct FlameNode {
                 ++it;
             }
         }
-    }
-
-    // 导出为折叠格式
-    void export_folded(const std::string& output_file) {
-        std::ofstream file(output_file);
-        if (! file.is_open()) {
-            throw FlameGraphException("Cannot create folded output file: " + output_file);
-        }
-
-        this->export_node_folded("", file);
     }
 
     TreeStats analyze_tree() {
@@ -344,26 +348,6 @@ struct FlameNode {
     }
 
   private:
-    void export_node_folded(const std::string& stack_prefix, std::ofstream& file) {
-        std::string current_stack = stack_prefix;
-        if (! name.empty() && name != "root") {
-            if (! current_stack.empty()) {
-                current_stack += ";";
-            }
-            current_stack += name;
-        }
-
-        // 输出当前节点的自采样
-        if (self_count > 0 && ! current_stack.empty()) {
-            file << current_stack << " " << self_count << "\n";
-        }
-
-        // 递归处理子节点
-        for (const auto& [name, child] : children) {
-            child->export_node_folded(current_stack, file);
-        }
-    }
-
     void analyze_node_recursive(TreeStats& stats, int depth) {
         stats.total_nodes++;
         stats.total_samples += self_count;
@@ -386,37 +370,74 @@ struct FlameNode {
 };
 
 struct FlameGraphConfig {
+    // 标题和说明
     std::string title = "Flame Graph";
-    int width = 1200;
-    int height = 800;
-    std::string font_type = "Verdana";
-    int font_size = 12;
-    std::string colors = "hot";
-    bool reverse = true;
-    bool inverted = true;
-    double min_width = 0.1;
-    bool write_folded_file = false;
-    bool show_percentages = true;     // 新增：显示百分比
-    bool interactive = true;          // 新增：是否生成交互式图表
-    int max_depth = 0;                // 新增：最大深度限制，0表示无限制
-    double min_heat_threshold = 0.01; // 新增：最小热度阈值
+    std::string subtitle = "subtitle"; // 默认无副标题
+
+    // 图像尺寸
+    int width = 1200;      // 标准宽度
+    int height = 0;        // 0 表示自动计算（根据堆栈深度）
+    int frame_height = 16; // 每个框架的高度
+
+    // 边距
+    int xpad = 10; // 左右边距
+
+    // 字体设置
+    std::string font_type = "Verdana"; // 标准字体
+    int font_size = 12;                // 标准字体大小
+    double font_width = 0.6;           // 字符宽度相对于 font_size 的比例
+
+    // 颜色设置
+    std::string colors = "hot";                  // 默认配色方案（hot, mem, io, java 等）
+    std::string bgcolor1 = "#eeeeee";            // 背景渐变开始颜色
+    std::string bgcolor2 = "#eeeeb0";            // 背景渐变结束颜色
+    std::string search_color = "rgb(230,0,230)"; // 搜索高亮颜色
+
+    // 文本标签
+    std::string name_type = "Function:"; // 函数名前缀
+    std::string count_name = "samples";  // 计数单位名称
+    std::string notes = "";              // SVG 内嵌注释
+
+    // 布局选项
+    bool reverse = false;  // false: 正常的调用栈顺序
+    bool inverted = false; // false: 火焰图, true: 冰柱图
+
+    // 过滤和显示选项
+    double min_width = 0.1;          // 最小像素宽度（小于此值的框架不显示）
+    int max_depth = 0;               // 0 表示无限制
+    double min_heat_threshold = 0.0; // 0 表示显示所有
+
+    // 功能开关
+    bool interactive = true;        // 生成交互式 SVG
+    bool write_folded_file = false; // 是否同时输出折叠格式文件
 
     // 验证配置
     void validate() const {
-        if (width <= 0 || height <= 0) {
-            throw FlameGraphException("Width and height must be positive");
+        if (width <= 0) {
+            throw FlameGraphException("Width must be positive");
         }
+        // height 可以为 0（自动计算）
         if (font_size <= 0) {
             throw FlameGraphException("Font size must be positive");
         }
         if (min_width < 0) {
             throw FlameGraphException("Min width cannot be negative");
         }
+        if (font_width <= 0 || font_width > 1) {
+            throw FlameGraphException("Font width must be between 0 and 1");
+        }
+        if (xpad < 0) {
+            throw FlameGraphException("Padding cannot be negative");
+        }
+
+        // 如果没有设置 frame_height，添加验证
+        if (frame_height <= 0) {
+            throw FlameGraphException("Frame height must be positive");
+        }
     }
 };
 
 // 🔥 ===== 堆栈样本数据结构 =====
-
 struct StackSample {
     std::vector<std::string> frames;
     size_t count = 1;
@@ -436,22 +457,12 @@ struct StackSample {
 };
 
 // 🔥 ===== 解析器基类和实现 =====
-
 class AbstractStackParser {
   public:
     virtual ~AbstractStackParser() = default;
 
-    virtual std::vector<StackSample> parse(const std::string& filename) = 0;
-    virtual std::string get_parser_name() const = 0;
-
-  protected:
-    std::string trim(const std::string& str) {
-        return utils::trim(str);
-    }
-
-    std::vector<std::string> split(const std::string& str, char delimiter) {
-        return utils::split(str, delimiter);
-    }
+    virtual std::vector<StackSample> parse(std::string_view filename) = 0;
+    virtual std::string_view get_parser_name() const = 0;
 };
 
 /**
@@ -459,19 +470,20 @@ class AbstractStackParser {
  */
 class PerfScriptParser : public AbstractStackParser {
   public:
-    std::vector<StackSample> parse(const std::string& filename) override {
-        if (! utils::file_exists(filename)) {
-            throw ParseException("File not found: " + filename);
+    std::vector<StackSample> parse(std::string_view filename) override {
+        if (! file_exists(filename)) {
+            throw ParseException(std::string("File not found: ") + filename.data());
         }
 
         std::vector<StackSample> samples;
-        std::ifstream file(filename);
+        std::ifstream file(filename.data());
 
         if (! file.is_open()) {
-            throw ParseException("Cannot open file: " + filename);
+            throw ParseException(std::string("Cannot open file: ") + filename.data());
         }
 
         std::string line;
+        std::string_view line_view;
         StackSample current_sample;
         bool reading_stack = false;
         size_t line_count = 0;
@@ -480,9 +492,9 @@ class PerfScriptParser : public AbstractStackParser {
             while (std::getline(file, line)) {
                 line_count++;
 
-                line = trim(line);
+                line_view = trim(line);
 
-                if (line.empty()) {
+                if (line_view.empty()) {
                     if (reading_stack && ! current_sample.frames.empty()) {
                         std::reverse(current_sample.frames.begin(), current_sample.frames.end());
                         if (current_sample.is_valid()) {
@@ -494,16 +506,17 @@ class PerfScriptParser : public AbstractStackParser {
                     continue;
                 }
 
-                if (! reading_stack && line.find(':') != std::string::npos) {
-                    parse_sample_header(line, current_sample);
+                if (! reading_stack && line_view.find(':') != std::string::npos) {
+                    parse_sample_header(line_view, current_sample);
                     reading_stack = true;
                     continue;
                 }
 
                 if (reading_stack) {
-                    std::string frame = parse_perf_stack_frame(line);
+                    std::string_view frame = parse_perf_stack_frame(line_view);
                     if (! frame.empty()) {
-                        current_sample.frames.push_back(frame);
+                        // 这里需要 string_view 转 string, 从而让 vector 拥有所有权
+                        current_sample.frames.push_back(std::string(frame));
                     }
                 }
             }
@@ -528,34 +541,34 @@ class PerfScriptParser : public AbstractStackParser {
         return samples;
     }
 
-    std::string get_parser_name() const override {
+    std::string_view get_parser_name() const override {
         return "PerfScriptParser";
     }
 
   private:
-    void parse_sample_header(const std::string& line, StackSample& sample) {
-        auto parts = split(line, ' ');
+    void parse_sample_header(std::string_view line_view, StackSample& sample) {
+        auto parts = split(line_view, ' ');
         if (! parts.empty()) {
             sample.process_name = parts[0];
         }
 
         // 尝试提取时间戳和其他元数据
         std::regex timestamp_regex(R"((\d+\.\d+):)");
-        std::smatch match;
-        if (std::regex_search(line, match, timestamp_regex)) {
+        std::cmatch match;
+        if (std::regex_search(line_view.begin(), line_view.end(), match, timestamp_regex)) {
             sample.timestamp = static_cast<uint64_t>(std::stod(match[1].str()) * 1000000); // 转换为微秒
         }
     }
 
-    std::string parse_perf_stack_frame(const std::string& line) {
-        std::string trimmed = trim(line);
+    std::string_view parse_perf_stack_frame(std::string_view line_view) {
+        std::string_view trimmed = trim(line_view);
 
         size_t first_space = trimmed.find(' ');
         if (first_space == std::string::npos) return "";
 
-        std::string content = trimmed.substr(first_space + 1);
-        std::string func_name;
-        std::string lib_name;
+        std::string_view content = trimmed.substr(first_space + 1);
+        std::string_view func_name;
+        std::string_view lib_name;
 
         size_t paren_start = content.find('(');
         size_t paren_end = content.find(')', paren_start);
@@ -584,7 +597,7 @@ class PerfScriptParser : public AbstractStackParser {
 
             // 如果已经是 [xxx]，就不再加括号
             if (! (lib_name.front() == '[' && lib_name.back() == ']')) {
-                lib_name = "[" + lib_name + "]";
+                lib_name = std::string("[") + lib_name.data() + "]";
             }
         }
 
@@ -601,25 +614,26 @@ class PerfScriptParser : public AbstractStackParser {
  */
 class GenericTextParser : public AbstractStackParser {
   public:
-    std::vector<StackSample> parse(const std::string& filename) override {
-        if (! utils::file_exists(filename)) {
-            throw ParseException("File not found: " + filename);
+    std::vector<StackSample> parse(std::string_view filename) override {
+        if (! file_exists(filename)) {
+            throw ParseException(std::string("File not found: ") + filename.data());
         }
 
         std::vector<StackSample> samples;
-        std::ifstream file(filename);
+        std::ifstream file(filename.data());
 
         if (! file.is_open()) {
-            throw ParseException("Cannot open file: " + filename);
+            throw ParseException(std::string("Cannot open file: ") + filename.data());
         }
 
         std::string line;
+        std::string_view line_view;
         std::vector<std::string> current_stack;
 
         while (std::getline(file, line)) {
-            line = trim(line);
+            line_view = trim(line);
 
-            if (line.empty() || line[0] == '#') {
+            if (line_view.empty() || line_view[0] == '#') {
                 if (! current_stack.empty()) {
                     samples.emplace_back(std::move(current_stack));
                     current_stack.clear();
@@ -627,7 +641,8 @@ class GenericTextParser : public AbstractStackParser {
                 continue;
             }
 
-            current_stack.push_back(line);
+            // 转移所有权
+            current_stack.push_back(std::string(line_view));
         }
 
         if (! current_stack.empty()) {
@@ -637,7 +652,7 @@ class GenericTextParser : public AbstractStackParser {
         return samples;
     }
 
-    std::string get_parser_name() const override {
+    std::string_view get_parser_name() const override {
         return "GenericTextParser";
     }
 };
@@ -647,24 +662,34 @@ class AutoDetectParser : public AbstractStackParser {
     std::unique_ptr<AbstractStackParser> actual_parser_;
 
   public:
-    std::vector<StackSample> parse(const std::string& filename) override {
+    std::vector<StackSample> parse(std::string_view filename) override {
         detect_format(filename);
         if (! actual_parser_) {
-            throw ParseException("Unable to detect file format for: " + filename);
+            throw ParseException(std::string("Unable to detect file format for: ") + filename.data());
         }
 
         return actual_parser_->parse(filename);
     }
 
-    std::string get_parser_name() const override {
-        return actual_parser_ ? "AutoDetect(" + actual_parser_->get_parser_name() + ")" : "AutoDetect(Unknown)";
+    std::string_view get_parser_name() const override {
+        return "AutoDetectParser";
+    }
+
+    std::string get_using_parser() const {
+        std::ostringstream oss;
+        if (actual_parser_) {
+            oss << "AutoDetect(" << actual_parser_->get_parser_name().data() << ")";
+        } else {
+            oss << "AutoDetect(Unknown)";
+        }
+        return oss.str();
     }
 
   private:
-    void detect_format(const std::string& filename) {
-        std::ifstream file(filename);
+    void detect_format(std::string_view filename) {
+        std::ifstream file(filename.data());
         if (! file.is_open()) {
-            throw ParseException("Cannot open file: " + filename);
+            throw ParseException(std::string("Cannot open file: ") + filename.data());
         }
 
         std::string line;
@@ -706,6 +731,7 @@ class StackCollapser {
     // 折叠堆栈: 读入样本，生成 folded 文件数据
     std::unordered_map<std::string, size_t> collapse(const std::vector<StackSample>& samples,
                                                      const StackCollapseOptions& options = {}) {
+        // 会 join_stack 生成新 string 所以 key 是 std::string
         std::unordered_map<std::string, size_t> folded_stacks;
 
         for (const auto& sample : samples) {
@@ -734,10 +760,10 @@ class StackCollapser {
     }
 
     // 写 folded 文件
-    void write_folded_file(const std::unordered_map<std::string, size_t>& folded_stacks, const std::string& filename) {
-        std::ofstream file(filename);
+    void write_folded_file(const std::unordered_map<std::string, size_t>& folded_stacks, std::string_view filename) {
+        std::ofstream file(filename.data());
         if (! file.is_open()) {
-            throw FlameGraphException("Cannot open folded file: " + filename);
+            throw FlameGraphException(std::string("Cannot open folded file: ") + filename.data());
         }
 
         for (const auto& [stack, count] : folded_stacks) {
@@ -747,13 +773,13 @@ class StackCollapser {
 
   private:
     std::vector<std::string> process_frames(const std::vector<std::string>& frames, const StackCollapseOptions&) {
-        // 🌟 这里只是个最小示例，直接返回原始 frames
+        // 这里只是个最小示例，直接返回原始 frames
         return frames;
     }
 
     std::string join_stack(const StackSample& sample, const std::vector<std::string>& frames) {
         std::ostringstream oss;
-        oss << sample.process_name << ";";
+        oss << (sample.process_name.empty() ? "UNKNOWN PROCESS" : sample.process_name) << ";";
         for (size_t i = 0; i < frames.size(); ++i) {
             if (i > 0) oss << ";";
             oss << frames[i];
@@ -763,10 +789,10 @@ class StackCollapser {
 };
 
 struct FlameGraphBuildOptions {
-    int max_depth = 0;             // 最大深度限制
-    size_t min_total_count = 1;    // 最小总计数
-    bool prune_small_nodes = true; // 修剪小节点
-    double prune_threshold = 0.01; // 修剪阈值（百分比）
+    int max_depth = 0;              // 最大深度限制
+    size_t min_total_count = 1;     // 最小总计数
+    bool prune_small_nodes = false; // 修剪小节点
+    double prune_threshold = 0.01;  // 修剪阈值（百分比）
 };
 
 class FlameGraphBuilder {
@@ -777,7 +803,7 @@ class FlameGraphBuilder {
         auto root = std::make_unique<FlameNode>("root");
 
         for (const auto& [stack_str, count] : folded_stacks) {
-            auto functions = split_stack(stack_str);
+            auto functions = split(stack_str, ';');
             if (functions.empty()) continue;
 
             // 应用深度限制
@@ -802,11 +828,6 @@ class FlameGraphBuilder {
 
         return root;
     }
-
-  private:
-    std::vector<std::string> split_stack(const std::string& stack_str) {
-        return utils::split(stack_str, ';');
-    }
 };
 
 class FlameGraphRenderer {
@@ -818,18 +839,19 @@ class FlameGraphRenderer {
     }
 
   public:
-    virtual void render(const FlameNode& root, const std::string& output_file) = 0;
+    virtual void render(const FlameNode& root, std::string_view output_file) = 0;
+    virtual ~FlameGraphRenderer() = default;
 };
 
 class HtmlFlameGraphRenderer : public FlameGraphRenderer {
   public:
     explicit HtmlFlameGraphRenderer(const FlameGraphConfig& config = {}) : FlameGraphRenderer(config) {}
 
-    void render(const FlameNode& root, const std::string& output_file) {
-        std::string d3_css = utils::read_relative_file("d3/d3-flamegraph.css");
-        std::string d3_js = utils::read_relative_file("d3/d3.v7.min.js");
-        std::string flamegraph_js = utils::read_relative_file("d3/d3-flamegraph.js");
-        std::ofstream ofs(output_file);
+    void render(const FlameNode& root, std::string_view output_file) override {
+        std::string d3_css = read_relative_file("d3/d3-flamegraph.css");
+        std::string d3_js = read_relative_file("d3/d3.v7.min.js");
+        std::string flamegraph_js = read_relative_file("d3/d3-flamegraph.js");
+        std::ofstream ofs(output_file.data());
 
         ofs << R"(<!DOCTYPE html>
 <html>
@@ -876,7 +898,7 @@ class HtmlFlameGraphRenderer : public FlameGraphRenderer {
 // 🔥 ===== SVG火焰图渲染器  =====
 class SvgFlameGraphRenderer : public FlameGraphRenderer {
   private:
-#include "flamegraph_js_embed.hpp" // FLAMEGRAPH_JS 变量可用
+#include "embed/flamegraph_js_embed.hpp" // FLAMEGRAPH_JS 变量可用
 
     std::ostringstream svg_content_;
     std::unique_ptr<ColorScheme> color_scheme_;
@@ -888,7 +910,7 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         setup_color_scheme();
     }
 
-    void render(const FlameNode& root, const std::string& output_file) {
+    void render(const FlameNode& root, std::string_view output_file) override {
         if (root.total_count == 0) {
             throw RenderException("Root node has no samples to render");
         }
@@ -896,24 +918,36 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         total_samples_ = root.total_count;
         max_depth_ = calculate_tree_height(root);
 
-        // 动态计算高度：每层16px + 顶部60px + 底部30px
-        int calculated_height = max_depth_ * 16 + 90;
-        if (calculated_height > config_.height) {
-            config_.height = calculated_height;
-        }
+        // 计算图像高度
+        int imageheight = calculate_image_height();
 
+        // 清空内容
         svg_content_.str("");
         svg_content_.clear();
 
-        write_svg_header();
-        write_background();
-        write_title_and_controls();
+        // 写入 SVG
+        write_svg_header(imageheight);
+        write_svg_defs();
+        write_svg_style();
+        write_svg_script();
+        write_svg_background(imageheight);
+        write_svg_controls(imageheight);
 
-        // 从底部开始渲染，符合标准火焰图布局
-        int base_y = config_.height - 50; // 底部留50px空间
-        render_flame_stack(root, 10.0, base_y, config_.width - 20.0, 0);
+        // 写入火焰图框架
+        svg_content_ << "<g id=\"frames\">\n";
 
-        write_svg_footer();
+        if (config_.inverted) {
+            // Icicle 图（倒置）
+            render_frames_icicle(root);
+        } else {
+            // 标准火焰图
+            render_frames_flamegraph(root);
+        }
+
+        svg_content_ << "</g>\n";
+        svg_content_ << "</svg>\n";
+
+        // 写入文件
         write_to_file(output_file);
     }
 
@@ -922,599 +956,280 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         color_scheme_ = ColorSchemeFactory::create(config_.colors);
     }
 
-    void write_svg_header() {
+    int calculate_image_height() const {
+        int ypad1 = config_.font_size * 3;                                // 顶部空间（标题）
+        int ypad2 = config_.font_size * 2 + 10;                           // 底部空间（标签）
+        int ypad3 = config_.subtitle.empty() ? 0 : config_.font_size * 2; // 副标题空间
+
+        return (max_depth_ + 1) * config_.frame_height + ypad1 + ypad2 + ypad3;
+    }
+
+    void write_svg_header(int imageheight) {
         svg_content_ << "<?xml version=\"1.0\" standalone=\"no\"?>\n";
         svg_content_ << "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" "
                      << "\"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n";
-        svg_content_ << "<svg version=\"1.1\" width=\"" << config_.width << "\" height=\"" << config_.height << "\" ";
+        svg_content_ << "<svg version=\"1.1\" "
+                     << "width=\"" << config_.width << "\" "
+                     << "height=\"" << imageheight << "\" "
+                     << "onload=\"init(evt)\" "
+                     << "viewBox=\"0 0 " << config_.width << " " << imageheight << "\" "
+                     << "xmlns=\"http://www.w3.org/2000/svg\" "
+                     << "xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
+                     << "xmlns:fg=\"http://github.com/jonhoo/inferno\">\n";
 
-        if (config_.interactive) {
-            svg_content_ << "onload=\"init(evt)\" ";
-        }
-
-        svg_content_ << "viewBox=\"0 0 " << config_.width << " " << config_.height
-                     << "\" xmlns=\"http://www.w3.org/2000/svg\" "
-                     << "xmlns:xlink=\"http://www.w3.org/1999/xlink\">\n";
-
-        write_flamegraph_comment();
-        write_defs_and_styles();
-
-        if (config_.interactive) {
-            write_javascript();
-        }
-    }
-
-    void write_flamegraph_comment() {
         svg_content_ << "<!-- Flame graph stack visualization. "
                      << "See https://github.com/brendangregg/FlameGraph for latest version, "
                      << "and http://www.brendangregg.com/flamegraphs.html for examples. -->\n";
-        svg_content_ << "<!-- NOTES:  -->\n";
+        svg_content_ << "<!-- NOTES: " << escape_xml(config_.notes) << " -->\n";
     }
 
-    void write_defs_and_styles() {
+    void write_svg_defs() {
         svg_content_ << "<defs>\n";
         svg_content_ << "  <linearGradient id=\"background\" y1=\"0\" y2=\"1\" x1=\"0\" x2=\"0\">\n";
-        svg_content_ << "    <stop stop-color=\"#eeeeee\" offset=\"5%\" />\n";
-        svg_content_ << "    <stop stop-color=\"#eeeeb0\" offset=\"95%\" />\n";
+        svg_content_ << "    <stop stop-color=\"" << config_.bgcolor1 << "\" offset=\"5%\" />\n";
+        svg_content_ << "    <stop stop-color=\"" << config_.bgcolor2 << "\" offset=\"95%\" />\n";
         svg_content_ << "  </linearGradient>\n";
         svg_content_ << "</defs>\n";
+    }
+
+    void write_svg_style() {
+        int title_size = config_.font_size + 5;
 
         svg_content_ << "<style type=\"text/css\">\n";
-        svg_content_ << "  .func_g:hover { stroke:black; stroke-width:0.5; cursor:pointer; }\n";
-        svg_content_ << "  .hidden { display: none !important; }\n";
+        svg_content_ << "  text { font-family:" << config_.font_type << "; font-size:" << config_.font_size
+                     << "px; fill:black; }\n";
+        svg_content_ << "  #search, #ignorecase { opacity:0.1; cursor:pointer; }\n";
+        svg_content_ << "  #search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }\n";
+        svg_content_ << "  #subtitle { text-anchor:middle; font-color:rgb(160,160,160); }\n";
+        svg_content_ << "  #title { text-anchor:middle; font-size:" << title_size << "px}\n";
+        svg_content_ << "  #unzoom { cursor:pointer; }\n";
+        svg_content_ << "  #frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }\n";
+        svg_content_ << "  .hide { display:none; }\n";
+        svg_content_ << "  .parent { opacity:0.5; }\n";
         svg_content_ << "</style>\n";
     }
 
-    void write_javascript() {
-        svg_content_ << R"mytag114514(<script type="text/ecmascript">
-<![CDATA[
-	"use strict";
-	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
-	function init(evt) {
-		details = document.getElementById("details").firstChild;
-		searchbtn = document.getElementById("search");
-		ignorecaseBtn = document.getElementById("ignorecase");
-		unzoombtn = document.getElementById("unzoom");
-		matchedtxt = document.getElementById("matched");
-		svg = document.getElementsByTagName("svg")[0];
-		searching = 0;
-		currentSearchTerm = null;
+    void write_svg_script() {
+        svg_content_ << "<script type=\"text/ecmascript\">\n<![CDATA[\n";
 
-		// use GET parameters to restore a flamegraphs state.
-		var params = get_params();
-		if (params.x && params.y)
-			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
-                if (params.s) search(params.s);
-	}
+        // 首先声明 use strict
+        svg_content_ << "\"use strict\";\n";
 
-	// event listeners
-	window.addEventListener("click", function(e) {
-		var target = find_group(e.target);
-		if (target) {
-			if (target.nodeName == "a") {
-				if (e.ctrlKey === false) return;
-				e.preventDefault();
-			}
-			if (target.classList.contains("parent")) unzoom(true);
-			zoom(target);
-			if (!document.querySelector('.parent')) {
-				// we have basically done a clearzoom so clear the url
-				var params = get_params();
-				if (params.x) delete params.x;
-				if (params.y) delete params.y;
-				history.replaceState(null, null, parse_params(params));
-				unzoombtn.classList.add("hide");
-				return;
-			}
+        // 声明全局变量（只声明一次）
+        svg_content_
+            << "var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;\n";
 
-			// set parameters for zoom state
-			var el = target.querySelector("rect");
-			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
-				var params = get_params()
-				params.x = el.attributes._orig_x.value;
-				params.y = el.attributes.y.value;
-				history.replaceState(null, null, parse_params(params));
-			}
-		}
-		else if (e.target.id == "unzoom") clearzoom();
-		else if (e.target.id == "search") search_prompt();
-		else if (e.target.id == "ignorecase") toggle_ignorecase();
-	}, false)
+        // 注入配置变量（作为赋值，不是新的声明）
+        svg_content_ << "var fontsize = " << config_.font_size << ";\n";
+        svg_content_ << "var fontwidth = " << std::fixed << std::setprecision(2) << config_.font_width << ";\n";
+        svg_content_ << "var xpad = " << config_.xpad << ";\n";
+        svg_content_ << "var inverted = " << (config_.inverted ? "true" : "false") << ";\n";
+        svg_content_ << "var searchcolor = '" << config_.search_color << "';\n";
+        svg_content_ << "var nametype = '" << escape_js(config_.name_type) << "';\n\n";
 
-	// mouse-over for info
-	// show
-	window.addEventListener("mouseover", function(e) {
-		var target = find_group(e.target);
-		if (target) details.nodeValue = "$nametype " + g_to_text(target);
-	}, false)
+        // 注入 JavaScript 代码
+        svg_content_ << FLAMEGRAPH_JS;
 
-	// clear
-	window.addEventListener("mouseout", function(e) {
-		var target = find_group(e.target);
-		if (target) details.nodeValue = ' ';
-	}, false)
-
-	// ctrl-F for search
-	// ctrl-I to toggle case-sensitive search
-	window.addEventListener("keydown",function (e) {
-		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
-			e.preventDefault();
-			search_prompt();
-		}
-		else if (e.ctrlKey && e.keyCode === 73) {
-			e.preventDefault();
-			toggle_ignorecase();
-		}
-	}, false)
-
-	// functions
-	function get_params() {
-		var params = {};
-		var paramsarr = window.location.search.substr(1).split('&');
-		for (var i = 0; i < paramsarr.length; ++i) {
-			var tmp = paramsarr[i].split("=");
-			if (!tmp[0] || !tmp[1]) continue;
-			params[tmp[0]]  = decodeURIComponent(tmp[1]);
-		}
-		return params;
-	}
-	function parse_params(params) {
-		var uri = "?";
-		for (var key in params) {
-			uri += key + '=' + encodeURIComponent(params[key]) + '&';
-		}
-		if (uri.slice(-1) == "&")
-			uri = uri.substring(0, uri.length - 1);
-		if (uri == '?')
-			uri = window.location.href.split('?')[0];
-		return uri;
-	}
-	function find_child(node, selector) {
-		var children = node.querySelectorAll(selector);
-		if (children.length) return children[0];
-	}
-	function find_group(node) {
-		var parent = node.parentElement;
-		if (!parent) return;
-		if (parent.id == "frames") return node;
-		return find_group(parent);
-	}
-	function orig_save(e, attr, val) {
-		if (e.attributes["_orig_" + attr] != undefined) return;
-		if (e.attributes[attr] == undefined) return;
-		if (val == undefined) val = e.attributes[attr].value;
-		e.setAttribute("_orig_" + attr, val);
-	}
-	function orig_load(e, attr) {
-		if (e.attributes["_orig_"+attr] == undefined) return;
-		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
-		e.removeAttribute("_orig_"+attr);
-	}
-	function g_to_text(e) {
-		var text = find_child(e, "title").firstChild.nodeValue;
-		return (text)
-	}
-	function g_to_func(e) {
-		var func = g_to_text(e);
-		// if there's any manipulation we want to do to the function
-		// name before it's searched, do it here before returning.
-		return (func);
-	}
-	function update_text(e) {
-		var r = find_child(e, "rect");
-		var t = find_child(e, "text");
-		var w = parseFloat(r.attributes.width.value) -3;
-		var txt = find_child(e, "title").textContent.replace(/\\([^(]*\\)\$/,"");
-		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
-
-		// Smaller than this size won't fit anything
-		if (w < 2 * $fontsize * $fontwidth) {
-			t.textContent = "";
-			return;
-		}
-
-		t.textContent = txt;
-		var sl = t.getSubStringLength(0, txt.length);
-		// check if only whitespace or if we can fit the entire string into width w
-		if (/^ *\$/.test(txt) || sl < w)
-			return;
-
-		// this isn't perfect, but gives a good starting point
-		// and avoids calling getSubStringLength too often
-		var start = Math.floor((w/sl) * txt.length);
-		for (var x = start; x > 0; x = x-2) {
-			if (t.getSubStringLength(0, x + 2) <= w) {
-				t.textContent = txt.substring(0, x) + "..";
-				return;
-			}
-		}
-		t.textContent = "";
-	}
-
-	// zoom
-	function zoom_reset(e) {
-		if (e.attributes != undefined) {
-			orig_load(e, "x");
-			orig_load(e, "width");
-		}
-		if (e.childNodes == undefined) return;
-		for (var i = 0, c = e.childNodes; i < c.length; i++) {
-			zoom_reset(c[i]);
-		}
-	}
-	function zoom_child(e, x, ratio) {
-		if (e.attributes != undefined) {
-			if (e.attributes.x != undefined) {
-				orig_save(e, "x");
-				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - $xpad) * ratio + $xpad;
-				if (e.tagName == "text")
-					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
-			}
-			if (e.attributes.width != undefined) {
-				orig_save(e, "width");
-				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
-			}
-		}
-
-		if (e.childNodes == undefined) return;
-		for (var i = 0, c = e.childNodes; i < c.length; i++) {
-			zoom_child(c[i], x - $xpad, ratio);
-		}
-	}
-	function zoom_parent(e) {
-		if (e.attributes) {
-			if (e.attributes.x != undefined) {
-				orig_save(e, "x");
-				e.attributes.x.value = $xpad;
-			}
-			if (e.attributes.width != undefined) {
-				orig_save(e, "width");
-				e.attributes.width.value = parseInt(svg.width.baseVal.value) - ($xpad * 2);
-			}
-		}
-		if (e.childNodes == undefined) return;
-		for (var i = 0, c = e.childNodes; i < c.length; i++) {
-			zoom_parent(c[i]);
-		}
-	}
-	function zoom(node) {
-		var attr = find_child(node, "rect").attributes;
-		var width = parseFloat(attr.width.value);
-		var xmin = parseFloat(attr.x.value);
-		var xmax = parseFloat(xmin + width);
-		var ymin = parseFloat(attr.y.value);
-		var ratio = (svg.width.baseVal.value - 2 * $xpad) / width;
-
-		// XXX: Workaround for JavaScript float issues (fix me)
-		var fudge = 0.0001;
-
-		unzoombtn.classList.remove("hide");
-
-		var el = document.getElementById("frames").children;
-		for (var i = 0; i < el.length; i++) {
-			var e = el[i];
-			var a = find_child(e, "rect").attributes;
-			var ex = parseFloat(a.x.value);
-			var ew = parseFloat(a.width.value);
-			var upstack;
-			// Is it an ancestor
-			if ($inverted == 0) {
-				upstack = parseFloat(a.y.value) > ymin;
-			} else {
-				upstack = parseFloat(a.y.value) < ymin;
-			}
-			if (upstack) {
-				// Direct ancestor
-				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
-					e.classList.add("parent");
-					zoom_parent(e);
-					update_text(e);
-				}
-				// not in current path
-				else
-					e.classList.add("hide");
-			}
-			// Children maybe
-			else {
-				// no common path
-				if (ex < xmin || ex + fudge >= xmax) {
-					e.classList.add("hide");
-				}
-				else {
-					zoom_child(e, xmin, ratio);
-					update_text(e);
-				}
-			}
-		}
-		search();
-	}
-	function unzoom(dont_update_text) {
-		unzoombtn.classList.add("hide");
-		var el = document.getElementById("frames").children;
-		for(var i = 0; i < el.length; i++) {
-			el[i].classList.remove("parent");
-			el[i].classList.remove("hide");
-			zoom_reset(el[i]);
-			if(!dont_update_text) update_text(el[i]);
-		}
-		search();
-	}
-	function clearzoom() {
-		unzoom();
-
-		// remove zoom state
-		var params = get_params();
-		if (params.x) delete params.x;
-		if (params.y) delete params.y;
-		history.replaceState(null, null, parse_params(params));
-	}
-
-	// search
-	function toggle_ignorecase() {
-		ignorecase = !ignorecase;
-		if (ignorecase) {
-			ignorecaseBtn.classList.add("show");
-		} else {
-			ignorecaseBtn.classList.remove("show");
-		}
-		reset_search();
-		search();
-	}
-	function reset_search() {
-		var el = document.querySelectorAll("#frames rect");
-		for (var i = 0; i < el.length; i++) {
-			orig_load(el[i], "fill")
-		}
-		var params = get_params();
-		delete params.s;
-		history.replaceState(null, null, parse_params(params));
-	}
-	function search_prompt() {
-		if (!searching) {
-			var term = prompt("Enter a search term (regexp " +
-			    "allowed, eg: ^ext4_)"
-			    + (ignorecase ? ", ignoring case" : "")
-			    + "\\nPress Ctrl-i to toggle case sensitivity", "");
-			if (term != null) search(term);
-		} else {
-			reset_search();
-			searching = 0;
-			currentSearchTerm = null;
-			searchbtn.classList.remove("show");
-			searchbtn.firstChild.nodeValue = "Search"
-			matchedtxt.classList.add("hide");
-			matchedtxt.firstChild.nodeValue = ""
-		}
-	}
-	function search(term) {
-		if (term) currentSearchTerm = term;
-		if (currentSearchTerm === null) return;
-
-		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
-		var el = document.getElementById("frames").children;
-		var matches = new Object();
-		var maxwidth = 0;
-		for (var i = 0; i < el.length; i++) {
-			var e = el[i];
-			var func = g_to_func(e);
-			var rect = find_child(e, "rect");
-			if (func == null || rect == null)
-				continue;
-
-			// Save max width. Only works as we have a root frame
-			var w = parseFloat(rect.attributes.width.value);
-			if (w > maxwidth)
-				maxwidth = w;
-
-			if (func.match(re)) {
-				// highlight
-				var x = parseFloat(rect.attributes.x.value);
-				orig_save(rect, "fill");
-				rect.attributes.fill.value = "$searchcolor";
-
-				// remember matches
-				if (matches[x] == undefined) {
-					matches[x] = w;
-				} else {
-					if (w > matches[x]) {
-						// overwrite with parent
-						matches[x] = w;
-					}
-				}
-				searching = 1;
-			}
-		}
-		if (!searching)
-			return;
-		var params = get_params();
-		params.s = currentSearchTerm;
-		history.replaceState(null, null, parse_params(params));
-
-		searchbtn.classList.add("show");
-		searchbtn.firstChild.nodeValue = "Reset Search";
-
-		// calculate percent matched, excluding vertical overlap
-		var count = 0;
-		var lastx = -1;
-		var lastw = 0;
-		var keys = Array();
-		for (k in matches) {
-			if (matches.hasOwnProperty(k))
-				keys.push(k);
-		}
-		// sort the matched frames by their x location
-		// ascending, then width descending
-		keys.sort(function(a, b){
-			return a - b;
-		});
-		// Step through frames saving only the biggest bottom-up frames
-		// thanks to the sort order. This relies on the tree property
-		// where children are always smaller than their parents.
-		var fudge = 0.0001;	// JavaScript floating point
-		for (var k in keys) {
-			var x = parseFloat(keys[k]);
-			var w = matches[keys[k]];
-			if (x >= lastx + lastw - fudge) {
-				count += w;
-				lastx = x;
-				lastw = w;
-			}
-		}
-		// display matched percent
-		matchedtxt.classList.remove("hide");
-		var pct = 100 * count / maxwidth;
-		if (pct != 100) pct = pct.toFixed(1)
-		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
-	}
-]]>
-</script>)mytag114514";
+        svg_content_ << "]]>\n</script>\n";
     }
 
-    void write_background() {
-        svg_content_ << "<rect x=\"0.0\" y=\"0\" width=\"" << config_.width << ".0\" height=\"" << config_.height
-                     << ".0\" fill=\"url(#background)\" />\n";
+    void write_svg_background(int imageheight) {
+        svg_content_ << "<rect x=\"0.0\" y=\"0\" width=\"" << config_.width << "\" height=\"" << imageheight
+                     << "\" fill=\"url(#background)\" />\n";
     }
 
-    void write_title_and_controls() {
-        // 主标题
-        svg_content_ << "<text text-anchor=\"middle\" x=\"" << (config_.width / 2)
-                     << "\" y=\"24\" font-size=\"17\" font-family=\"Verdana\" fill=\"rgb(0,0,0)\">"
-                     << utils::escape_xml(config_.title) << "</text>\n";
+    void write_svg_controls(int imageheight) {
+        int ypad2 = config_.font_size * 2 + 10;
 
-        if (config_.interactive) {
-            // 详情显示区域
-            svg_content_ << "<text text-anchor=\"\" x=\"10.00\" y=\"" << (config_.height - 17)
-                         << "\" font-size=\"12\" font-family=\"Verdana\" fill=\"rgb(0,0,0)\" id=\"details\"> </text>\n";
+        // 标题
+        svg_content_ << "<text id=\"title\" x=\"" << (config_.width / 2) << "\" y=\"" << (config_.font_size * 2)
+                     << "\">" << escape_xml(config_.title) << "</text>\n";
 
-            // 重置缩放按钮
-            svg_content_ << "<text text-anchor=\"\" x=\"10.00\" y=\"24\" font-size=\"12\" "
-                         << "font-family=\"Verdana\" fill=\"rgb(0,0,0)\" id=\"unzoom\" "
-                         << "onclick=\"unzoom()\" style=\"opacity:0.0;cursor:pointer\">Reset Zoom</text>\n";
-
-            // 搜索按钮
-            svg_content_ << "<text text-anchor=\"\" x=\"" << (config_.width - 110)
-                         << "\" y=\"24\" font-size=\"12\" font-family=\"Verdana\" fill=\"rgb(0,0,0)\" "
-                         << "id=\"search\" onmouseover=\"searchover()\" onmouseout=\"searchout()\" "
-                         << "onclick=\"search_prompt()\" style=\"opacity:0.1;cursor:pointer\">Search</text>\n";
-
-            // 匹配结果显示
-            svg_content_ << "<text text-anchor=\"\" x=\"" << (config_.width - 110) << "\" y=\"" << (config_.height - 17)
-                         << "\" font-size=\"12\" font-family=\"Verdana\" fill=\"rgb(0,0,0)\" "
-                         << "id=\"matched\"> </text>\n";
-        }
-    }
-
-    void render_flame_stack(const FlameNode& node, double x, double base_y, double width, int depth) {
-        // 使用更严格的浮点比较
-        const double epsilon = 1e-9;
-        if (width < config_.min_width + epsilon) return;
-        if (config_.max_depth > 0 && depth >= config_.max_depth) return;
-
-        // 计算当前节点的Y坐标（从底部往上）
-        double current_y = base_y - (depth * 16);
-
-        // 渲染当前节点（跳过根节点的渲染）
-        if (depth > 0) {
-            render_rect_element(node, x, current_y, width);
+        // 副标题
+        if (! config_.subtitle.empty()) {
+            svg_content_ << "<text id=\"subtitle\" x=\"" << (config_.width / 2) << "\" y=\"" << (config_.font_size * 4)
+                         << "\">" << escape_xml(config_.subtitle) << "</text>\n";
         }
 
-        // 渲染子节点
-        if (! node.children.empty()) {
-            double child_x = x;
+        // 详情文本
+        svg_content_ << "<text id=\"details\" x=\"" << config_.xpad << "\" y=\"" << (imageheight - ypad2 / 2)
+                     << "\"> </text>\n";
 
-            for (const auto& [child_name, child] : node.children) {
-                if (node.total_count == 0) continue;
+        // 重置缩放按钮
+        svg_content_ << "<text id=\"unzoom\" x=\"" << config_.xpad << "\" y=\"" << (config_.font_size * 2)
+                     << "\" class=\"hide\">Reset Zoom</text>\n";
 
-                double child_width = width * (static_cast<double>(child->total_count) / node.total_count);
+        // 搜索按钮
+        svg_content_ << "<text id=\"search\" x=\"" << (config_.width - config_.xpad - 100) << "\" y=\""
+                     << (config_.font_size * 2) << "\">Search</text>\n";
 
-                if (child_width >= config_.min_width + epsilon) {
-                    render_flame_stack(*child, child_x, base_y, child_width, depth + 1);
+        // 忽略大小写按钮
+        svg_content_ << "<text id=\"ignorecase\" x=\"" << (config_.width - config_.xpad - 16) << "\" y=\""
+                     << (config_.font_size * 2) << "\">ic</text>\n";
+
+        // 匹配文本
+        svg_content_ << "<text id=\"matched\" x=\"" << (config_.width - config_.xpad - 100) << "\" y=\""
+                     << (imageheight - ypad2 / 2) << "\"> </text>\n";
+    }
+
+    void render_frames_flamegraph(const FlameNode& root) {
+        int ypad = config_.font_size * 2 + 10;
+
+        double width_per_sample = (config_.width - 2.0 * config_.xpad) / static_cast<double>(total_samples_);
+
+        // 渲染根节点
+        int imageheight = calculate_image_height();
+        double y = imageheight - ypad - config_.frame_height;
+
+        render_frame(root, config_.xpad, y, config_.width - 2 * config_.xpad, "", 0);
+
+        // 递归渲染子节点
+        render_children_flamegraph(root, config_.xpad, y, 1, width_per_sample);
+    }
+
+    void render_frames_icicle(const FlameNode& root) {
+        int ypad1 = config_.font_size * 3;
+        int ypad3 = config_.subtitle.empty() ? 0 : config_.font_size * 2;
+
+        double width_per_sample = (config_.width - 2.0 * config_.xpad) / static_cast<double>(total_samples_);
+        double y = ypad1 + ypad3;
+
+        // 渲染根节点
+        render_frame(root, config_.xpad, y, config_.width - 2 * config_.xpad, "", 0);
+
+        // 递归渲染子节点
+        render_children_icicle(root, config_.xpad, y, 1, width_per_sample);
+    }
+
+    void
+    render_children_flamegraph(const FlameNode& node, double x, double parent_y, int depth, double width_per_sample) {
+        double child_x = x;
+        double child_y = parent_y - config_.frame_height;
+
+        for (const auto& [name, child] : node.children) {
+            double child_width = static_cast<double>(child->total_count) * width_per_sample;
+
+            if (child_width >= config_.min_width) {
+                render_frame(*child, child_x, child_y, child_width, name, depth);
+
+                if (! child->children.empty()) {
+                    render_children_flamegraph(*child, child_x, child_y, depth + 1, width_per_sample);
                 }
-
-                child_x += child_width;
             }
+
+            child_x += child_width;
         }
     }
 
-    void render_rect_element(const FlameNode& node, double x, double y, double width) {
-        const int rect_height = 15;
+    void render_children_icicle(const FlameNode& node, double x, double parent_y, int depth, double width_per_sample) {
+        double child_x = x;
+        double child_y = parent_y + config_.frame_height;
 
-        // 生成颜色
-        std::string color = color_scheme_->get_color(node.name, node.get_heat_ratio());
+        for (const auto& [name, child] : node.children) {
+            double child_width = static_cast<double>(child->total_count) * width_per_sample;
 
-        // 开始group元素
-        svg_content_ << "<g class=\"func_g\"";
+            if (child_width >= config_.min_width) {
+                render_frame(*child, child_x, child_y, child_width, name, depth);
 
-        if (config_.interactive) {
-            svg_content_ << " onmouseover=\"s(this)\" onmouseout=\"c()\" onclick=\"zoom(this)\"";
-        }
-
-        svg_content_ << ">\n";
-
-        // 构建tooltip内容
-        std::string tooltip = build_tooltip_text(node);
-        svg_content_ << "<title>" << utils::escape_xml(tooltip) << "</title>";
-
-        // 渲染矩形 - 使用更高精度
-        svg_content_ << "<rect x=\"" << std::fixed << std::setprecision(2) << x << "\" y=\"" << static_cast<int>(y)
-                     << "\" width=\"" << std::setprecision(2) << width << "\" height=\"" << rect_height << ".0\" "
-                     << "fill=\"" << color << "\" rx=\"2\" ry=\"2\" />\n";
-
-        // 渲染文本（如果空间够大）
-        if (width > 20) { // 只有足够宽时才显示文本
-            std::string display_text = get_display_text(node.name, width);
-            if (! display_text.empty()) {
-                svg_content_ << "<text text-anchor=\"\" x=\"" << std::setprecision(2) << (x + 3) << "\" y=\""
-                             << std::setprecision(1) << (y + 11.5)
-                             << "\" font-size=\"12\" font-family=\"Verdana\" fill=\"rgb(0,0,0)\">"
-                             << utils::escape_xml(display_text) << "</text>\n";
+                if (! child->children.empty()) {
+                    render_children_icicle(*child, child_x, child_y, depth + 1, width_per_sample);
+                }
             }
+
+            child_x += child_width;
         }
+    }
+
+    void render_frame(const FlameNode& node, double x, double y, double width, const std::string& name, int depth) {
+        // 获取函数名（根节点显示 "all"）
+        std::string func_name = name.empty() ? "all" : name;
+
+        // 构建 title（tooltip）
+        std::string title = build_frame_title(func_name, node.total_count);
+
+        // 获取颜色
+        std::string color = get_frame_color(func_name, depth);
+
+        // 开始 g 元素
+        svg_content_ << "<g>\n";
+        svg_content_ << "<title>" << escape_xml(title) << "</title>\n";
+
+        // 渲染矩形 - 添加 fg:x 和 fg:w 属性
+        svg_content_ << "<rect x=\"" << std::fixed << std::setprecision(1) << x << "\" y=\"" << static_cast<int>(y)
+                     << "\" width=\"" << std::setprecision(1) << width << "\" height=\"" << (config_.frame_height - 1)
+                     << "\" fill=\"" << color << "\" rx=\"2\" ry=\"2\""
+                     << " fg:x=\"" << static_cast<int>(x) << "\" fg:w=\"" << static_cast<int>(width) << "\" />\n";
+
+        // 总是渲染文本元素（即使初始为空）
+        std::string display_text = "";
+        if (should_render_text(width)) {
+            display_text = truncate_text(func_name, width);
+        }
+        svg_content_ << "<text x=\"" << std::setprecision(2) << (x + 3) << "\" y=\"" << std::setprecision(1)
+                     << (y + config_.frame_height - 5) << "\">" << escape_xml(display_text) << "</text>\n";
 
         svg_content_ << "</g>\n";
     }
 
-    std::string build_tooltip_text(const FlameNode& node) {
-        std::ostringstream tooltip;
-        tooltip << node.name;
+    std::string build_frame_title(const std::string& func_name, size_t samples) {
+        std::ostringstream title;
+        title << func_name;
 
-        if (config_.show_percentages && total_samples_ > 0) {
-            double percentage = (static_cast<double>(node.total_count) / total_samples_) * 100.0;
-            tooltip << " (" << node.total_count << " samples, " << std::fixed << std::setprecision(2) << percentage
-                    << "%)";
+        if (config_.count_name.empty()) {
+            title << " (" << samples << " samples";
         } else {
-            tooltip << " (" << node.total_count << " samples)";
+            title << " (" << samples << " " << config_.count_name;
         }
 
-        return tooltip.str();
+        if (total_samples_ > 0) {
+            double percentage = (static_cast<double>(samples) / static_cast<double>(total_samples_)) * 100.0;
+            title << ", " << std::fixed << std::setprecision(2) << percentage << "%)";
+        } else {
+            title << ")";
+        }
+
+        return title.str();
     }
 
-    std::string get_display_text(const std::string& text, double width) {
-        // 基于宽度估算可显示的字符数（假设平均字符宽度约为7像素）
-        int max_chars = static_cast<int>((width - 6) / 7); // 减去padding
+    std::string get_frame_color(const std::string& func_name, int depth) {
+        if (func_name == "all" && depth == 0) {
+            return "rgb(250,250,250)"; // 根节点用浅色
+        }
 
-        if (max_chars < 4) return ""; // 太窄不显示
+        if (func_name == "--" || func_name == "-") {
+            return "rgb(240,240,240)"; // 分隔符用灰色
+        }
 
-        if (static_cast<int>(text.length()) <= max_chars) {
+        // 计算热度比例：深度越大（越靠近栈顶），热度越高
+        double heat_ratio = 0.0;
+        if (max_depth_ > 0) {
+            heat_ratio = static_cast<double>(depth) / max_depth_;
+        }
+
+        return color_scheme_->get_color(func_name, heat_ratio);
+    }
+
+    bool should_render_text(double width) const {
+        // 估算最少需要显示3个字符加上 ".."
+        double min_text_width = 5 * config_.font_size * config_.font_width;
+        return width >= min_text_width;
+    }
+
+    std::string truncate_text(const std::string& text, double width) {
+        // 估算可以显示的字符数
+        int available_chars = static_cast<int>((width - 6) / (config_.font_size * config_.font_width));
+
+        if (available_chars <= 0) return "";
+
+        if (static_cast<int>(text.length()) <= available_chars) {
             return text;
         }
 
-        // 智能截断：优先保留函数名
-        size_t last_colon = text.find_last_of(':');
-        size_t last_slash = text.find_last_of('/');
-        size_t last_space = text.find_last_of(' ');
-
-        size_t split_pos = std::max({last_colon, last_slash, last_space});
-
-        if (split_pos != std::string::npos && split_pos + 1 < text.length()) {
-            std::string suffix = text.substr(split_pos + 1);
-            if (static_cast<int>(suffix.length()) + 3 <= max_chars) {
-                return ".." + suffix;
-            }
+        if (available_chars < 3) {
+            return "";
         }
 
-        // 简单截断
-        return text.substr(0, max_chars - 2) + "..";
+        return text.substr(0, available_chars - 2) + "..";
     }
 
     int calculate_tree_height(const FlameNode& node) {
@@ -1530,29 +1245,84 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         }
     }
 
-    void write_svg_footer() {
-        svg_content_ << "</svg>\n";
+    std::string escape_xml(const std::string& str) {
+        std::string result;
+        for (char c : str) {
+            switch (c) {
+                case '&':
+                    result += "&amp;";
+                    break;
+                case '<':
+                    result += "&lt;";
+                    break;
+                case '>':
+                    result += "&gt;";
+                    break;
+                case '"':
+                    result += "&quot;";
+                    break;
+                case '\'':
+                    result += "&apos;";
+                    break;
+                default:
+                    result += c;
+                    break;
+            }
+        }
+        return result;
     }
 
-    void write_to_file(const std::string& output_file) {
-        std::ofstream file(output_file);
+    std::string escape_js(const std::string& str) {
+        std::string result;
+        for (char c : str) {
+            switch (c) {
+                case '\\':
+                    result += "\\\\";
+                    break;
+                case '\'':
+                    result += "\\'";
+                    break;
+                case '"':
+                    result += "\\\"";
+                    break;
+                case '\n':
+                    result += "\\n";
+                    break;
+                case '\r':
+                    result += "\\r";
+                    break;
+                case '\t':
+                    result += "\\t";
+                    break;
+                default:
+                    result += c;
+                    break;
+            }
+        }
+        return result;
+    }
+
+    void write_to_file(std::string_view output_file) {
+        std::ofstream file(output_file.data());
         if (! file.is_open()) {
-            throw RenderException("Cannot create SVG file: " + output_file);
+            throw RenderException(std::string("Cannot create SVG file: ") + output_file.data());
         }
 
         file << svg_content_.str();
 
         if (! file.good()) {
-            throw RenderException("Error writing to SVG file: " + output_file);
+            throw RenderException(std::string("Error writing to SVG file: ") + output_file.data());
         }
+
+        file.close();
     }
 };
 
 class FlameGraphRendererFactory {
     using CreatorFunc = std::function<std::unique_ptr<FlameGraphRenderer>()>;
 
-    static const std::unordered_map<std::string, CreatorFunc>& get_render_map() {
-        static const std::unordered_map<std::string, CreatorFunc> render_map = {
+    static const std::unordered_map<std::string_view, CreatorFunc>& get_render_map() {
+        static const std::unordered_map<std::string_view, CreatorFunc> render_map = {
             { "svg",  []() { return std::make_unique<SvgFlameGraphRenderer>(); }},
             {"html", []() { return std::make_unique<HtmlFlameGraphRenderer>(); }},
         };
@@ -1560,9 +1330,9 @@ class FlameGraphRendererFactory {
     }
 
   public:
-    static std::unique_ptr<FlameGraphRenderer> create(const std::string& render_suffix) {
+    static std::unique_ptr<FlameGraphRenderer> create(std::string_view filetype) {
         const auto& map = get_render_map();
-        auto it = map.find(render_suffix);
+        auto it = map.find(filetype);
         if (it != map.end()) {
             return it->second(); // 调用 lambda，生成实例
         }
@@ -1585,7 +1355,11 @@ class FlameGraphGenerator {
         auto parser = std::make_unique<AutoDetectParser>();
         StackCollapser collapser;
         FlameGraphBuilder builder;
-        auto renderer = FlameGraphRendererFactory::create(utils::get_suffix(out_file));
+        auto suffix = file_suffix(out_file);
+        if (suffix.empty()) {
+            throw FlameGraphException("File suffix empty");
+        }
+        auto renderer = FlameGraphRendererFactory::create(suffix);
 
         try {
             // 解析原始数据
@@ -1595,7 +1369,7 @@ class FlameGraphGenerator {
                 throw FlameGraphException("No valid samples found in input file");
             }
 
-            std::cout << "Parsed " << samples.size() << " samples using " << parser->get_parser_name() << "\n";
+            std::cout << "Parsed " << samples.size() << " samples using " << parser->get_using_parser() << "\n";
 
             // 折叠堆栈
             StackCollapseOptions collapse_opts;
