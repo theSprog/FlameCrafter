@@ -12,12 +12,15 @@ from typing import Dict, List, Tuple
 
 class FlameGraphBenchmark:
     def __init__(self):
-        self.executable = "./flamegraph_example"
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
         self.test_configs = [
             ("small", 1000, "1K"),
             ("medium", 10000, "10K"), 
             ("large", 100000, "100K"),
         ]
+        print("BASE_DIR: ", BASE_DIR)
+        self.executable = os.path.join(BASE_DIR, "../flamegraph_main")
+        self.generate_data_script = os.path.join(BASE_DIR, "../script/generate_test_data.py")
         
     def ensure_executable_exists(self) -> bool:
         """确保可执行文件存在"""
@@ -37,7 +40,7 @@ class FlameGraphBenchmark:
         print(f"📊 Generating {size_name} test data ({sample_count:,} samples)...")
         
         cmd = [
-            "python3", "generate_test_data.py", 
+            "python3", self.generate_data_script, 
             "--output", test_file,
             "--samples", str(sample_count)
         ]
