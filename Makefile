@@ -75,7 +75,7 @@ perf-all: perf-small perf-medium perf-large perf-huge
 # Comprehensive benchmark
 benchmark: $(TARGET)
 	@echo "🏆 Running comprehensive benchmark..."
-	python3 benchmark/benchmark.py
+	python3 bench/benchmark.py
 
 # Help
 help:

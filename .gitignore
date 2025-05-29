@@ -6,3 +6,5 @@ medium_*
 large_*
 huge_*
 perf.*
+*.svg
+*.collapse

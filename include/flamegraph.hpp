@@ -597,7 +597,7 @@ class PerfScriptParser : public AbstractStackParser {
 
             // 如果已经是 [xxx]，就不再加括号
             if (! (lib_name.front() == '[' && lib_name.back() == ']')) {
-                lib_name = std::string("[") + lib_name.data() + "]";
+                lib_name = std::string("[") + std::string(lib_name) + "]";
             }
         }
 
@@ -696,7 +696,7 @@ class AutoDetectParser : public AbstractStackParser {
         int lines_checked = 0;
         bool has_perf_format = false;
 
-        while (std::getline(file, line) && lines_checked < 16) {
+        while (std::getline(file, line) && lines_checked < 128) {
             line = trim(line);
             if (line.empty()) continue;
 
@@ -1381,7 +1381,7 @@ class FlameGraphGenerator {
             }
 
             if (config_.write_folded_file) {
-                collapser.write_folded_file(folded, raw_file + ".collapse");
+                collapser.write_folded_file(folded, out_file + ".collapse");
             }
 
             std::cout << "Collapsed to " << folded.size() << " unique stacks\n";

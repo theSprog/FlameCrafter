@@ -1,6 +1,7 @@
 #include "./include/flamegraph.hpp"
 #include <iostream>
 #include <chrono>
+#include <stdexcept>
 
 using namespace flamegraph;
 
@@ -31,6 +32,8 @@ int main(int argc, char* argv[]) {
             std::cout << "⏱️  Processing time: " << duration.count() << " ms\n";
             
             return 0;
+        } else {
+            throw std::invalid_argument("not 3 argument");
         }
     } catch (const std::exception& e) {
         std::cerr << "❌ Error: " << e.what() << std::endl;
