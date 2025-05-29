@@ -4,7 +4,8 @@ CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g
 TARGET = flamegraph_main
 SOURCE = example_main.cpp
-HEADER = include/flamegraph.hpp
+HEADER_DIR = include
+HEADER = $(HEADER_DIR)/flamegraph.hpp
 BUILD_DIR = build
 
 # Default target
@@ -28,10 +29,6 @@ clean:
 	rm -f *.collapse
 	rm -f flamegraph.svg
 	find build/ -type f ! -name 'holder' -exec rm -f {} +
-
-# Install (copy header to system include path - optional)
-install:
-	sudo cp $(HEADER) /usr/local/include/
 
 # Performance tests with different data sizes
 perf-small: $(TARGET)
@@ -72,7 +69,6 @@ help:
 	@echo "  all           - Build the example program"
 	@echo "  run           - Build and run the example"
 	@echo "  clean         - Remove all generated files"
-	@echo "  install       - Copy header to system include path"
 	@echo "  perf-small    - Performance test with 1K samples"
 	@echo "  perf-medium   - Performance test with 10K samples"
 	@echo "  perf-large    - Performance test with 100K samples"
