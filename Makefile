@@ -27,6 +27,7 @@ clean:
 	rm -f *_test.txt *_flamegraph.html *_flamegraph.svg
 	rm -f *.collapse
 	rm -f flamegraph.svg
+	find build/ -type f ! -name 'holder' -exec rm -f {} +
 
 # Install (copy header to system include path - optional)
 install:
