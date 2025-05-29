@@ -24,6 +24,9 @@ clean:
 	rm -f *.svg *.html
 	rm -f *.txt
 	rm -f *.folded
+	rm -f *_test.txt *_flamegraph.html *_flamegraph.svg
+	rm -f *.collapse
+	rm -f flamegraph.svg
 
 # Install (copy header to system include path - optional)
 install:
