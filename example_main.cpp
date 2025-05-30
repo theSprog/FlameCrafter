@@ -16,7 +16,7 @@ int main(int argc, char* argv[]) {
             FlameGraphConfig config;
             config.title = "Performance Test Flame Graph";
             config.interactive = true;
-            config.write_folded_file = true;
+            config.write_folded_file = false;
             
             FlameGraphGenerator generator(config);
             
