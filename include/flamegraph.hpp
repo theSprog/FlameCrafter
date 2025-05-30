@@ -17,7 +17,6 @@
 #include <stdexcept>
 #include <regex>
 #include <cassert>
-#include <charconv>
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -166,109 +165,6 @@ inline uintmax_t get_file_size(std::string_view filename) {
     return std::filesystem::file_size(filename);
 }
 } // namespace
-
-class StringBuilder {
-  private:
-    std::string buffer_;
-    bool fixed_format_ = false;
-    std::streamsize precision_ = 6;
-
-  public:
-    explicit StringBuilder(size_t reserve_size = 1024) {
-        buffer_.reserve(reserve_size);
-    }
-
-    void reserve(size_t reserve_size) {
-        buffer_.reserve(reserve_size);
-    }
-
-    StringBuilder& operator<<(char c) {
-        buffer_.push_back(c);
-        return *this;
-    }
-
-    StringBuilder& operator<<(const char* str) {
-        buffer_.append(str);
-        return *this;
-    }
-
-    StringBuilder& operator<<(const std::string& str) {
-        buffer_.append(str);
-        return *this;
-    }
-
-    StringBuilder& operator<<(std::string_view sv) {
-        buffer_.append(sv);
-        return *this;
-    }
-
-    StringBuilder& operator<<(int value) {
-        // 使用 to_chars (C++17) 而不是 to_string, 性能更高
-        char temp[32];
-        auto result = std::to_chars(temp, temp + sizeof(temp), value);
-        buffer_.append(temp, result.ptr - temp);
-        return *this;
-    }
-
-    StringBuilder& operator<<(double value) {
-        char temp[64];
-        std::to_chars_result result;
-
-        if (fixed_format_) {
-            result =
-                std::to_chars(temp, temp + sizeof(temp), value, std::chars_format::fixed, static_cast<int>(precision_));
-        } else {
-            result = std::to_chars(temp,
-                                   temp + sizeof(temp),
-                                   value,
-                                   std::chars_format::general,
-                                   static_cast<int>(precision_));
-        }
-
-        buffer_.append(temp, result.ptr - temp);
-        return *this;
-    }
-
-    StringBuilder& operator<<(float value) {
-        return *this << static_cast<double>(value);
-    }
-
-    template <typename T>
-    StringBuilder& operator<<(const T& manip) {
-        // 确保不是基本类型被误匹配到这里
-        static_assert(! std::is_arithmetic_v<T>, "Arithmetic types should have explicit overloads");
-        static_assert(! std::is_convertible_v<T, const char*>, "char pointers should have explicit overloads");
-
-        // 用临时 ostringstream 来解析操纵符
-        std::ostringstream temp;
-        temp << manip;
-
-        // 检查是否是 fixed 格式
-        if (temp.flags() & std::ios_base::fixed) {
-            fixed_format_ = true;
-        }
-
-        // 获取精度
-        precision_ = temp.precision();
-
-        return *this;
-    }
-
-    std::string str() && {
-        // move 移除内部成员
-        return std::move(buffer_);
-    }
-
-    void clear() {
-        buffer_.clear();
-        fixed_format_ = false;
-        precision_ = 6;
-    }
-
-    const std::string& str() const& {
-        return buffer_;
-    }
-};
 
 struct MMapBuffer {
     void* addr;
@@ -1075,8 +971,7 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
   private:
 #include "embed/flamegraph_js_embed.hpp" // FLAMEGRAPH_JS 变量可用
 
-    // std::ostringstream svg_content_;
-    StringBuilder svg_content_;
+    std::ofstream svg_content_;
     std::unique_ptr<ColorScheme> color_scheme_;
     size_t total_samples_ = 0;
     int max_depth_ = 0;
@@ -1090,17 +985,21 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         if (root.total_count == 0) {
             throw RenderException("Root node has no samples to render");
         }
-
         total_samples_ = root.total_count;
-        // 提前预留内存
-        size_t reserve_size = estimate_reserve_size(total_samples_);
-        svg_content_.reserve(reserve_size);
+
+        svg_content_.open(output_file.data());
+        if (! svg_content_.is_open()) {
+            throw RenderException(std::string("Cannot create SVG file: ") + output_file.data());
+        }
 
         // 写入 svg
         write_svg(root);
 
-        // 写入文件
-        write_to_file(output_file);
+        if (! svg_content_.good()) {
+            throw RenderException(std::string("Error writing to SVG file: ") + output_file.data());
+        }
+
+        svg_content_.close();
     }
 
   private:
@@ -1355,32 +1254,7 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         svg_content_ << "</g>\n";
     }
 
-    void escape_xml_to_stream(std::string_view str, StringBuilder& os) {
-        for (char c : str) {
-            switch (c) {
-                case '&':
-                    os << "&amp;";
-                    break;
-                case '<':
-                    os << "&lt;";
-                    break;
-                case '>':
-                    os << "&gt;";
-                    break;
-                case '"':
-                    os << "&quot;";
-                    break;
-                case '\'':
-                    os << "&apos;";
-                    break;
-                default:
-                    os << c;
-                    break;
-            }
-        }
-    }
-
-    void escape_xml_to_stream(std::string_view str, std::ostringstream& os) {
+    void escape_xml_to_stream(std::string_view str, std::ofstream& os) {
         for (char c : str) {
             switch (c) {
                 case '&':
@@ -1454,21 +1328,6 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         for (const auto& [name, child] : node.children) {
             calculate_depth_recursive(*child, current_depth + 1, max_depth);
         }
-    }
-
-    void write_to_file(std::string_view output_file) {
-        std::ofstream file(output_file.data());
-        if (! file.is_open()) {
-            throw RenderException(std::string("Cannot create SVG file: ") + output_file.data());
-        }
-
-        file << svg_content_.str();
-
-        if (! file.good()) {
-            throw RenderException(std::string("Error writing to SVG file: ") + output_file.data());
-        }
-
-        file.close();
     }
 };
 
