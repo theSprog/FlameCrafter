@@ -16,6 +16,14 @@ function init(evt) {
     if (params.s) search(params.s);
 }
 
+window.addEventListener("load", function() {
+    var el = document.getElementById("frames").children;
+    for (var i = 0; i < el.length; i++) {
+        update_text(el[i]);
+    }
+});
+
+
 // 事件监听器
 window.addEventListener("click", function(e) {
     var target = find_group(e.target);
@@ -135,6 +143,10 @@ function g_to_func(e) {
 function update_text(e) {
     var r = find_child(e, "rect");
     var t = find_child(e, "text");
+    var title = find_child(e, "title");
+    if (!r || !t || !title) {
+        return;
+    }
     var w = parseFloat(r.attributes.width.value) -3;
     var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/, "");
     t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
@@ -209,7 +221,9 @@ function zoom_parent(e) {
 }
 
 function zoom(node) {
-    var attr = find_child(node, "rect").attributes;
+    var rect = find_child(node, "rect");
+    if (!rect || !rect.attributes) return;
+    var attr = rect.attributes;
     var width = parseFloat(attr.width.value);
     var xmin = parseFloat(attr.x.value);
     var xmax = parseFloat(xmin + width);

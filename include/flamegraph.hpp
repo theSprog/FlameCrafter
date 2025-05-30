@@ -11,7 +11,6 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
-#include <map>
 #include <algorithm>
 #include <iomanip>
 #include <filesystem>
@@ -19,28 +18,56 @@
 #include <regex>
 #include <cassert>
 
-namespace flamegraph {
+#include <sys/mman.h>
+#include <unistd.h>
+#include <fcntl.h>
 
-// 🔥 ===== 异常处理 =====
+namespace flamegraph {
 
 class FlameGraphException : public std::runtime_error {
   public:
-    explicit FlameGraphException(const std::string& message) : std::runtime_error("FlameGraph Error: " + message) {}
+    explicit FlameGraphException(std::string_view message)
+        : std::runtime_error(std::string("FlameGraph Error: ") + message.data()) {}
+};
+
+class MemoryException : public std::runtime_error {
+  public:
+    explicit MemoryException(std::string_view message)
+        : std::runtime_error(std::string("Memory Error: ") + message.data()) {}
+};
+
+class FileNotFoundException : public std::runtime_error {
+  public:
+    explicit FileNotFoundException(std::string_view message)
+        : std::runtime_error(std::string("File not found: ") + message.data()) {}
+};
+
+class OpenFileException : public std::runtime_error {
+  public:
+    explicit OpenFileException(std::string_view message)
+        : std::runtime_error(std::string("Cannot open file: ") + message.data()) {}
 };
 
 class ParseException : public FlameGraphException {
   public:
-    explicit ParseException(const std::string& message) : FlameGraphException("Parse Error: " + message) {}
+    explicit ParseException(std::string_view message)
+        : FlameGraphException(std::string("Parse Error: ") + message.data()) {}
 };
 
 class RenderException : public FlameGraphException {
   public:
-    explicit RenderException(const std::string& message) : FlameGraphException("Render Error: " + message) {}
+    explicit RenderException(std::string_view message)
+        : FlameGraphException(std::string("Render Error: ") + message.data()) {}
 };
 
-// 🔥 ===== 工具函数 =====
-
 namespace {
+template <typename T>
+std::string to_string(const T& obj) {
+    std::ostringstream oss;
+    oss << obj;
+    return oss.str();
+}
+
 inline std::string_view trim(std::string_view str) {
     const auto first = str.find_first_not_of(" \t\r\n");
     if (first == std::string_view::npos) {
@@ -139,7 +166,56 @@ inline uintmax_t get_file_size(std::string_view filename) {
 }
 } // namespace
 
-// 🔥 ===== 颜色方案 =====
+struct MMapBuffer {
+    void* addr;
+    size_t size;
+
+    MMapBuffer(std::string_view filename) {
+        int fd = open(filename.data(), O_RDONLY);
+        if (fd == -1) throw MemoryException("open failed");
+        size = lseek(fd, 0, SEEK_END);
+        addr = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (addr == MAP_FAILED) throw MemoryException("mmap failed");
+        close(fd);
+    }
+
+    ~MMapBuffer() {
+        munmap(addr, size);
+    }
+
+    std::string_view view() const {
+        return {static_cast<char*>(addr), size};
+    }
+};
+
+struct LineScanner {
+    std::string_view buffer;
+    size_t pos = 0;
+    size_t line_number = 0;
+
+    explicit LineScanner(std::string_view data) : buffer(data) {}
+
+    // 获取下一行，trim 后返回；如果读完，返回空 view
+    std::string_view next_trimmed_line() {
+        if (pos >= buffer.size()) {
+            return {};
+        }
+
+        size_t end = buffer.find('\n', pos);
+        if (end == std::string_view::npos) end = buffer.size();
+
+        std::string_view line = buffer.substr(pos, end - pos);
+        pos = end + 1;
+        line_number++;
+
+        return trim(line);
+    }
+
+    // 是否读完
+    bool eof() const {
+        return pos >= buffer.size();
+    }
+};
 
 class ColorScheme {
   public:
@@ -203,7 +279,6 @@ class ClassicHotColorScheme : public ColorScheme {
     }
 };
 
-// 配色方案工厂
 class ColorSchemeFactory {
   private:
     // 定义一个映射表，存储可用的配色方案
@@ -239,7 +314,6 @@ class ColorSchemeFactory {
     }
 };
 
-// 🔥 ===== 核心数据结构 =====
 // 统计信息结构
 struct TreeStats {
     size_t total_nodes = 0;
@@ -249,16 +323,59 @@ struct TreeStats {
     std::vector<size_t> depth_distribution;
 };
 
+struct Frame {
+    struct Hasher {
+        size_t operator()(const Frame& f) const noexcept {
+            size_t h1 = std::hash<std::string_view>{}(f.name);
+            size_t h2 = std::hash<bool>{}(f.is_func);
+            size_t h3 = std::hash<bool>{}(f.lib_include_brackets);
+            size_t combined = h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+            combined ^= h3 + 0x9e3779b9 + (combined << 6) + (combined >> 2);
+            return combined;
+        }
+    };
+
+    std::string_view name; // 底层零拷贝视图
+    bool is_func;
+    bool lib_include_brackets; // 是否已经加了 [xxx]
+
+    // 可扩展字段: pid, 线程id, 采样率等
+
+    Frame() : Frame("") {}
+
+    explicit Frame(std::string_view name, bool is_func = true, bool lib_include_brackets = false)
+        : name(name), is_func(is_func), lib_include_brackets(lib_include_brackets) {}
+
+    bool operator==(const Frame& other) const noexcept {
+        return name == other.name && is_func == other.is_func && lib_include_brackets == other.lib_include_brackets;
+    }
+
+    bool empty() {
+        return name.empty();
+    }
+
+    friend inline std::ostream& operator<<(std::ostream& os, const Frame& f) {
+        if (! f.is_func && ! f.lib_include_brackets) {
+            os << "[";
+        }
+        os << (f.name.empty() ? "root" : f.name);
+        if (! f.is_func && ! f.lib_include_brackets) {
+            os << "]";
+        }
+        return os;
+    }
+};
+
 struct FlameNode {
-    std::string name;
+    Frame frame;
     size_t self_count = 0;
     size_t total_count = 0;
-    std::map<std::string, std::unique_ptr<FlameNode>, std::less<>> children;
+    std::unordered_map<Frame, std::unique_ptr<FlameNode>, Frame::Hasher> children;
     FlameNode* parent = nullptr; // 父节点指针
 
     FlameNode() = default;
 
-    explicit FlameNode(std::string_view func_name) : name(func_name) {}
+    explicit FlameNode(Frame frame) : frame(frame) {}
 
     // 禁用拷贝/移动构造函数
     FlameNode(FlameNode&& other) noexcept = delete;
@@ -266,13 +383,13 @@ struct FlameNode {
     FlameNode(const FlameNode&) = delete;
     FlameNode& operator=(const FlameNode&) = delete;
 
-    FlameNode* get_or_create_child(std::string_view child_name) {
-        auto it = children.find(child_name);
+    FlameNode* get_or_create_child(Frame child_frame) {
+        auto it = children.find(child_frame);
         if (it == children.end()) {
-            auto child = std::make_unique<FlameNode>(child_name);
+            auto child = std::make_unique<FlameNode>(child_frame);
             FlameNode* child_ptr = child.get();
             child_ptr->parent = this; // 设置父指针
-            children[std::string(child_name)] = std::move(child);
+            children[child_frame] = std::move(child);
             return child_ptr;
         }
         return it->second.get();
@@ -284,18 +401,6 @@ struct FlameNode {
             child->update_total_count();
             total_count += child->total_count;
         }
-    }
-
-    // 新增：获取路径
-    std::vector<std::string> get_path() const {
-        std::vector<std::string> path;
-        const FlameNode* current = this;
-        while (current != nullptr && ! current->name.empty() && current->name != "root") {
-            path.push_back(current->name);
-            current = current->parent;
-        }
-        std::reverse(path.begin(), path.end());
-        return path;
     }
 
     // 新增：计算热度（相对于父节点）
@@ -329,7 +434,7 @@ struct FlameNode {
     std::string to_json_string() const {
         std::ostringstream oss;
         oss << "{";
-        oss << "\"name\":\"" << name << "\",";
+        oss << "\"name\":\"" << frame << "\",";
         oss << "\"value\":" << total_count;
 
         if (! children.empty()) {
@@ -437,17 +542,15 @@ struct FlameGraphConfig {
     }
 };
 
-// 🔥 ===== 堆栈样本数据结构 =====
 struct StackSample {
-    std::vector<std::string> frames;
+    std::vector<Frame> frames;
     size_t count = 1;
-    std::string process_name;
+    std::string_view process_name;
     uint64_t timestamp = 0;
-    std::unordered_map<std::string, std::string> metadata; // 新增：元数据
 
     StackSample() = default;
 
-    StackSample(std::vector<std::string> stack_frames, size_t sample_count = 1)
+    StackSample(std::vector<Frame> stack_frames, size_t sample_count = 1)
         : frames(std::move(stack_frames)), count(sample_count) {}
 
     // 新增：验证样本有效性
@@ -461,7 +564,7 @@ class AbstractStackParser {
   public:
     virtual ~AbstractStackParser() = default;
 
-    virtual std::vector<StackSample> parse(std::string_view filename) = 0;
+    virtual std::vector<StackSample> parse(std::string_view buffer) = 0;
     virtual std::string_view get_parser_name() const = 0;
 };
 
@@ -470,69 +573,30 @@ class AbstractStackParser {
  */
 class PerfScriptParser : public AbstractStackParser {
   public:
-    std::vector<StackSample> parse(std::string_view filename) override {
-        if (! file_exists(filename)) {
-            throw ParseException(std::string("File not found: ") + filename.data());
-        }
-
+    std::vector<StackSample> parse(std::string_view buffer) override {
         std::vector<StackSample> samples;
-        std::ifstream file(filename.data());
-
-        if (! file.is_open()) {
-            throw ParseException(std::string("Cannot open file: ") + filename.data());
-        }
-
-        std::string line;
-        std::string_view line_view;
         StackSample current_sample;
         bool reading_stack = false;
-        size_t line_count = 0;
+        LineScanner scanner(buffer);
 
-        try {
-            while (std::getline(file, line)) {
-                line_count++;
+        while (true) {
+            std::string_view line = scanner.next_trimmed_line();
+            if (line.empty() && scanner.eof()) break;
 
-                line_view = trim(line);
-
-                if (line_view.empty()) {
-                    if (reading_stack && ! current_sample.frames.empty()) {
-                        std::reverse(current_sample.frames.begin(), current_sample.frames.end());
-                        if (current_sample.is_valid()) {
-                            samples.push_back(std::move(current_sample));
-                        }
-                        current_sample = StackSample();
-                    }
-                    reading_stack = false;
-                    continue;
-                }
-
-                if (! reading_stack && line_view.find(':') != std::string::npos) {
-                    parse_sample_header(line_view, current_sample);
-                    reading_stack = true;
-                    continue;
-                }
-
+            if (line.empty()) { // 空行：当前 stack 结束
                 if (reading_stack) {
-                    std::string_view frame = parse_perf_stack_frame(line_view);
-                    if (! frame.empty()) {
-                        // 这里需要 string_view 转 string, 从而让 vector 拥有所有权
-                        current_sample.frames.push_back(std::string(frame));
-                    }
+                    push_valid_sample(samples, current_sample);
                 }
+                reading_stack = false;
+            } else { // 非空行：做解析
+                parse_line(line, current_sample, reading_stack);
             }
-
-            // 处理最后一个样本
-            if (reading_stack && ! current_sample.frames.empty()) {
-                std::reverse(current_sample.frames.begin(), current_sample.frames.end());
-                if (current_sample.is_valid()) {
-                    samples.push_back(std::move(current_sample));
-                }
-            }
-
-        } catch (const std::exception& e) {
-            throw ParseException("Error parsing line " + std::to_string(line_count) + ": " + e.what());
         }
 
+        // 文件结束后，最后一个样本（如果有）
+        if (reading_stack) {
+            push_valid_sample(samples, current_sample);
+        }
 
         if (samples.empty()) {
             throw ParseException("No valid samples found in file");
@@ -560,17 +624,17 @@ class PerfScriptParser : public AbstractStackParser {
         }
     }
 
-    std::string_view parse_perf_stack_frame(std::string_view line_view) {
-        std::string_view trimmed = trim(line_view);
+    Frame parse_perf_stack_frame(std::string_view line) {
+        // i.e. "7f0b8bf5766d malloc+0x5d (/usr/lib/libc.so.6)"
+        size_t first_space = line.find(' '); // 跳过 address
+        if (first_space == std::string::npos) return Frame{};
 
-        size_t first_space = trimmed.find(' ');
-        if (first_space == std::string::npos) return "";
+        std::string_view content = line.substr(first_space + 1);
+        std::string_view func_name{};
+        std::string_view lib_name{};
+        bool lib_include_brackets = false;
 
-        std::string_view content = trimmed.substr(first_space + 1);
-        std::string_view func_name;
-        std::string_view lib_name;
-
-        size_t paren_start = content.find('(');
+        size_t paren_start = content.rfind('(');
         size_t paren_end = content.find(')', paren_start);
 
         if (paren_start != std::string::npos && paren_end != std::string::npos) {
@@ -580,9 +644,7 @@ class PerfScriptParser : public AbstractStackParser {
             func_name = content;
         }
 
-        if (func_name.find("[unknown]") != std::string::npos) {
-            func_name = "[unknown]";
-        } else {
+        if (func_name != "[unknown]") {
             size_t plus_pos = func_name.find('+');
             if (plus_pos != std::string::npos) {
                 func_name = func_name.substr(0, plus_pos);
@@ -596,15 +658,39 @@ class PerfScriptParser : public AbstractStackParser {
             }
 
             // 如果已经是 [xxx]，就不再加括号
-            if (! (lib_name.front() == '[' && lib_name.back() == ']')) {
-                lib_name = std::string("[") + std::string(lib_name) + "]";
+            if (lib_name.front() == '[' && lib_name.back() == ']') {
+                lib_include_brackets = true;
             }
         }
 
-        if (func_name.empty() || func_name == "[unknown]") {
-            return lib_name.empty() ? "[unknown]" : lib_name;
+        if (! func_name.empty() && func_name != "[unknown]") {
+            return Frame(func_name);
         } else {
-            return func_name;
+            // 如果没有 func_name 则使用 lib 替代
+            return Frame{lib_name, false, lib_include_brackets};
+        }
+    }
+
+    // 只有合法的 sample 才会被 push
+    void push_valid_sample(std::vector<StackSample>& samples, StackSample& current_sample) {
+        if (! current_sample.frames.empty()) {
+            std::reverse(current_sample.frames.begin(), current_sample.frames.end());
+            if (current_sample.is_valid()) {
+                samples.push_back(std::move(current_sample));
+            }
+            current_sample = StackSample();
+        }
+    }
+
+    void parse_line(std::string_view line_view, StackSample& current_sample, bool& reading_stack) {
+        if (! reading_stack && line_view.find(':') != std::string::npos) {
+            parse_sample_header(line_view, current_sample);
+            reading_stack = true;
+        } else if (reading_stack) {
+            Frame frame = parse_perf_stack_frame(line_view);
+            if (! frame.empty()) {
+                current_sample.frames.push_back(frame);
+            }
         }
     }
 };
@@ -614,39 +700,31 @@ class PerfScriptParser : public AbstractStackParser {
  */
 class GenericTextParser : public AbstractStackParser {
   public:
-    std::vector<StackSample> parse(std::string_view filename) override {
-        if (! file_exists(filename)) {
-            throw ParseException(std::string("File not found: ") + filename.data());
-        }
-
+    std::vector<StackSample> parse(std::string_view buffer) override {
         std::vector<StackSample> samples;
-        std::ifstream file(filename.data());
+        std::vector<Frame> current_stacks;
+        LineScanner scanner(buffer);
 
-        if (! file.is_open()) {
-            throw ParseException(std::string("Cannot open file: ") + filename.data());
-        }
+        while (true) {
+            std::string_view line = scanner.next_trimmed_line();
+            if (line.empty() && scanner.eof()) break;
 
-        std::string line;
-        std::string_view line_view;
-        std::vector<std::string> current_stack;
-
-        while (std::getline(file, line)) {
-            line_view = trim(line);
-
-            if (line_view.empty() || line_view[0] == '#') {
-                if (! current_stack.empty()) {
-                    samples.emplace_back(std::move(current_stack));
-                    current_stack.clear();
+            // 跳过空行和注释
+            if (line.empty() || line[0] == '#') {
+                if (! current_stacks.empty()) {
+                    samples.emplace_back(std::move(current_stacks));
+                    current_stacks.clear();
                 }
                 continue;
             }
 
-            // 转移所有权
-            current_stack.push_back(std::string(line_view));
+            // 非空、非注释，拷贝到 stack（因为外部仍然需要所有权）
+            current_stacks.emplace_back(line);
         }
 
-        if (! current_stack.empty()) {
-            samples.emplace_back(std::move(current_stack));
+        // 文件结束后，最后一个 stack（如果有）
+        if (! current_stacks.empty()) {
+            samples.emplace_back(std::move(current_stacks));
         }
 
         return samples;
@@ -660,15 +738,16 @@ class GenericTextParser : public AbstractStackParser {
 class AutoDetectParser : public AbstractStackParser {
   private:
     std::unique_ptr<AbstractStackParser> actual_parser_;
+    static constexpr int MAX_PREVIEW_LINE = 128;
 
   public:
-    std::vector<StackSample> parse(std::string_view filename) override {
-        detect_format(filename);
+    std::vector<StackSample> parse(std::string_view buffer) override {
+        detect_format(buffer);
         if (! actual_parser_) {
-            throw ParseException(std::string("Unable to detect file format for: ") + filename.data());
+            throw ParseException(std::string("Unable to detect file format for: ") + buffer.data());
         }
 
-        return actual_parser_->parse(filename);
+        return actual_parser_->parse(buffer);
     }
 
     std::string_view get_parser_name() const override {
@@ -686,28 +765,27 @@ class AutoDetectParser : public AbstractStackParser {
     }
 
   private:
-    void detect_format(std::string_view filename) {
-        std::ifstream file(filename.data());
-        if (! file.is_open()) {
-            throw ParseException(std::string("Cannot open file: ") + filename.data());
-        }
-
-        std::string line;
+    void detect_format(std::string_view buffer) {
+        size_t start = 0;
         int lines_checked = 0;
         bool has_perf_format = false;
 
-        while (std::getline(file, line) && lines_checked < 128) {
-            line = trim(line);
-            if (line.empty()) continue;
+        while (start < buffer.size() && lines_checked < MAX_PREVIEW_LINE) {
+            size_t end = buffer.find('\n', start);
+            if (end == std::string_view::npos) end = buffer.size();
 
-            // 检查perf格式
-            if (line.find("cycles:") != std::string::npos || line.find("instructions:") != std::string::npos ||
-                (line.find_first_of("0123456789abcdef") == 0 && line.find("(") != std::string::npos)) {
-                has_perf_format = true;
-                break;
+            std::string_view line = buffer.substr(start, end - start);
+            line = trim(line);
+
+            if (! line.empty()) {
+                if (is_like_perf(line)) {
+                    has_perf_format = true;
+                    break;
+                }
             }
 
             lines_checked++;
+            start = end + 1; // 下一行
         }
 
         if (has_perf_format) {
@@ -715,6 +793,11 @@ class AutoDetectParser : public AbstractStackParser {
         } else {
             actual_parser_ = std::make_unique<GenericTextParser>();
         }
+    }
+
+    bool is_like_perf(std::string_view line) {
+        return line.find("cycles:") != std::string_view::npos || line.find("instructions:") != std::string_view::npos ||
+               (line.find_first_of("0123456789abcdef") == 0 && line.find("(") != std::string_view::npos);
     }
 };
 
@@ -726,65 +809,59 @@ struct StackCollapseOptions {
     size_t min_count_threshold = 1;           // 最小计数阈值
 };
 
+struct CollapsedStack {
+    struct VectorFrameHash {
+        size_t operator()(const std::vector<Frame>& frames) const noexcept {
+            size_t hash = 0;
+            for (const auto& f : frames) {
+                size_t combined = Frame::Hasher{}(f);
+                hash ^= combined + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+            }
+            return hash;
+        }
+    };
+
+    std::unordered_map<std::vector<Frame>, size_t, VectorFrameHash> collapsed;
+
+    bool empty() const {
+        return collapsed.empty();
+    }
+};
+
 class StackCollapser {
   public:
     // 折叠堆栈: 读入样本，生成 folded 文件数据
-    std::unordered_map<std::string, size_t> collapse(const std::vector<StackSample>& samples,
-                                                     const StackCollapseOptions& options = {}) {
-        // 会 join_stack 生成新 string 所以 key 是 std::string
-        std::unordered_map<std::string, size_t> folded_stacks;
+    CollapsedStack collapse(const std::vector<StackSample>& samples, const StackCollapseOptions& options = {}) {
+        (void)options;
+        CollapsedStack collapsed_stacks;
 
         for (const auto& sample : samples) {
-            if (! sample.is_valid()) continue;
-
-            auto processed_frames = process_frames(sample.frames, options);
-            if (processed_frames.empty()) continue;
-
-            std::string folded_stack = join_stack(sample, processed_frames);
-            folded_stacks[folded_stack] += sample.count;
+            // 统计出现次数
+            collapsed_stacks.collapsed[sample.frames] += sample.count;
         }
 
-        // 应用最小计数阈值
-        if (options.min_count_threshold > 1) {
-            auto it = folded_stacks.begin();
-            while (it != folded_stacks.end()) {
-                if (it->second < options.min_count_threshold) {
-                    it = folded_stacks.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-
-        return folded_stacks;
+        return collapsed_stacks;
     }
 
     // 写 folded 文件
-    void write_folded_file(const std::unordered_map<std::string, size_t>& folded_stacks, std::string_view filename) {
-        std::ofstream file(filename.data());
-        if (! file.is_open()) {
-            throw FlameGraphException(std::string("Cannot open folded file: ") + filename.data());
+    void write_folded_file(const CollapsedStack& collapsed_stacks,
+                           std::string_view filename,
+                           const StackCollapseOptions& options = {}) {
+        (void)options;
+        std::ofstream ofs(filename.data());
+        if (! ofs.is_open()) {
+            throw OpenFileException(filename);
         }
 
-        for (const auto& [stack, count] : folded_stacks) {
-            file << stack << " " << count << "\n";
+        for (const auto& [frames, count] : collapsed_stacks.collapsed) {
+            for (size_t i = 0; i < frames.size(); ++i) {
+                if (i > 0) {
+                    ofs << ';';
+                }
+                ofs << frames[i];
+            }
+            ofs << ' ' << count << '\n';
         }
-    }
-
-  private:
-    std::vector<std::string> process_frames(const std::vector<std::string>& frames, const StackCollapseOptions&) {
-        // 这里只是个最小示例，直接返回原始 frames
-        return frames;
-    }
-
-    std::string join_stack(const StackSample& sample, const std::vector<std::string>& frames) {
-        std::ostringstream oss;
-        oss << (sample.process_name.empty() ? "UNKNOWN PROCESS" : sample.process_name) << ";";
-        for (size_t i = 0; i < frames.size(); ++i) {
-            if (i > 0) oss << ";";
-            oss << frames[i];
-        }
-        return oss.str();
     }
 };
 
@@ -797,23 +874,17 @@ struct FlameGraphBuildOptions {
 
 class FlameGraphBuilder {
   public:
-    std::unique_ptr<FlameNode> build_tree(const std::unordered_map<std::string, size_t>& folded_stacks,
+    std::unique_ptr<FlameNode> build_tree(const CollapsedStack& folded_stacks,
                                           const FlameGraphBuildOptions& options = {}) {
 
-        auto root = std::make_unique<FlameNode>("root");
+        auto root = std::make_unique<FlameNode>(Frame("root"));
 
-        for (const auto& [stack_str, count] : folded_stacks) {
-            auto functions = split(stack_str, ';');
-            if (functions.empty()) continue;
-
-            // 应用深度限制
-            if (options.max_depth > 0 && static_cast<int>(functions.size()) > options.max_depth) {
-                functions.resize(options.max_depth);
-            }
+        for (const auto& [stack_frame, count] : folded_stacks.collapsed) {
+            if (stack_frame.empty()) continue;
 
             FlameNode* current = root.get();
-            for (const auto& func : functions) {
-                current = current->get_or_create_child(func);
+            for (const auto& frame : stack_frame) {
+                current = current->get_or_create_child(frame);
             }
 
             current->self_count += count;
@@ -1025,7 +1096,7 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         svg_content_ << "var xpad = " << config_.xpad << ";\n";
         svg_content_ << "var inverted = " << (config_.inverted ? "true" : "false") << ";\n";
         svg_content_ << "var searchcolor = '" << config_.search_color << "';\n";
-        svg_content_ << "var nametype = '" << escape_js(config_.name_type) << "';\n\n";
+        svg_content_ << "var nametype = '" << config_.name_type << "';\n\n";
 
         // 注入 JavaScript 代码
         svg_content_ << FLAMEGRAPH_JS;
@@ -1081,7 +1152,7 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         int imageheight = calculate_image_height();
         double y = imageheight - ypad - config_.frame_height;
 
-        render_frame(root, config_.xpad, y, config_.width - 2 * config_.xpad, "", 0);
+        render_frame(root, config_.xpad, y, config_.width - 2 * config_.xpad, Frame(""), 0);
 
         // 递归渲染子节点
         render_children_flamegraph(root, config_.xpad, y, 1, width_per_sample);
@@ -1095,7 +1166,7 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         double y = ypad1 + ypad3;
 
         // 渲染根节点
-        render_frame(root, config_.xpad, y, config_.width - 2 * config_.xpad, "", 0);
+        render_frame(root, config_.xpad, y, config_.width - 2 * config_.xpad, Frame(""), 0);
 
         // 递归渲染子节点
         render_children_icicle(root, config_.xpad, y, 1, width_per_sample);
@@ -1106,11 +1177,11 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         double child_x = x;
         double child_y = parent_y - config_.frame_height;
 
-        for (const auto& [name, child] : node.children) {
+        for (const auto& [frame, child] : node.children) {
             double child_width = static_cast<double>(child->total_count) * width_per_sample;
 
             if (child_width >= config_.min_width) {
-                render_frame(*child, child_x, child_y, child_width, name, depth);
+                render_frame(*child, child_x, child_y, child_width, frame, depth);
 
                 if (! child->children.empty()) {
                     render_children_flamegraph(*child, child_x, child_y, depth + 1, width_per_sample);
@@ -1140,40 +1211,60 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         }
     }
 
-    void render_frame(const FlameNode& node, double x, double y, double width, const std::string& name, int depth) {
-        // 获取函数名（根节点显示 "all"）
-        std::string func_name = name.empty() ? "all" : name;
-
+    void render_frame(const FlameNode& node, double x, double y, double width, Frame frame, int depth) {
         // 构建 title（tooltip）
-        std::string title = build_frame_title(func_name, node.total_count);
+        std::string title = build_frame_title(frame, node.total_count);
 
         // 获取颜色
-        std::string color = get_frame_color(func_name, depth);
+        std::string color = get_frame_color(frame.name, depth);
 
         // 开始 g 元素
         svg_content_ << "<g>\n";
-        svg_content_ << "<title>" << escape_xml(title) << "</title>\n";
 
-        // 渲染矩形 - 添加 fg:x 和 fg:w 属性
+        // 写 title
+        svg_content_ << "<title>";
+        escape_xml_to_stream(title, svg_content_);
+        svg_content_ << "</title>\n";
+
         svg_content_ << "<rect x=\"" << std::fixed << std::setprecision(1) << x << "\" y=\"" << static_cast<int>(y)
                      << "\" width=\"" << std::setprecision(1) << width << "\" height=\"" << (config_.frame_height - 1)
-                     << "\" fill=\"" << color << "\" rx=\"2\" ry=\"2\""
-                     << " fg:x=\"" << static_cast<int>(x) << "\" fg:w=\"" << static_cast<int>(width) << "\" />\n";
+                     << "\" fill=\"" << color << "\" rx=\"2\" ry=\"2\" />\n";
 
-        // 总是渲染文本元素（即使初始为空）
-        std::string display_text = "";
-        if (should_render_text(width)) {
-            display_text = truncate_text(func_name, width);
-        }
+        // 留空，直接让浏览器去 title 里面拿信息
         svg_content_ << "<text x=\"" << std::setprecision(2) << (x + 3) << "\" y=\"" << std::setprecision(1)
-                     << (y + config_.frame_height - 5) << "\">" << escape_xml(display_text) << "</text>\n";
+                     << (y + config_.frame_height - 5) << "\"></text>\n";
 
         svg_content_ << "</g>\n";
     }
 
-    std::string build_frame_title(const std::string& func_name, size_t samples) {
+    void escape_xml_to_stream(std::string_view str, std::ostream& os) {
+        for (char c : str) {
+            switch (c) {
+                case '&':
+                    os << "&amp;";
+                    break;
+                case '<':
+                    os << "&lt;";
+                    break;
+                case '>':
+                    os << "&gt;";
+                    break;
+                case '"':
+                    os << "&quot;";
+                    break;
+                case '\'':
+                    os << "&apos;";
+                    break;
+                default:
+                    os << c;
+                    break;
+            }
+        }
+    }
+
+    std::string build_frame_title(Frame frame, size_t samples) {
         std::ostringstream title;
-        title << func_name;
+        title << frame;
 
         if (config_.count_name.empty()) {
             title << " (" << samples << " samples";
@@ -1191,8 +1282,8 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         return title.str();
     }
 
-    std::string get_frame_color(const std::string& func_name, int depth) {
-        if (func_name == "all" && depth == 0) {
+    std::string get_frame_color(std::string_view func_name, int depth) {
+        if (func_name == "root" && depth == 0) {
             return "rgb(250,250,250)"; // 根节点用浅色
         }
 
@@ -1209,29 +1300,6 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         return color_scheme_->get_color(func_name, heat_ratio);
     }
 
-    bool should_render_text(double width) const {
-        // 估算最少需要显示3个字符加上 ".."
-        double min_text_width = 5 * config_.font_size * config_.font_width;
-        return width >= min_text_width;
-    }
-
-    std::string truncate_text(const std::string& text, double width) {
-        // 估算可以显示的字符数
-        int available_chars = static_cast<int>((width - 6) / (config_.font_size * config_.font_width));
-
-        if (available_chars <= 0) return "";
-
-        if (static_cast<int>(text.length()) <= available_chars) {
-            return text;
-        }
-
-        if (available_chars < 3) {
-            return "";
-        }
-
-        return text.substr(0, available_chars - 2) + "..";
-    }
-
     int calculate_tree_height(const FlameNode& node) {
         int max_depth = 0;
         calculate_depth_recursive(node, 0, max_depth);
@@ -1243,63 +1311,6 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         for (const auto& [name, child] : node.children) {
             calculate_depth_recursive(*child, current_depth + 1, max_depth);
         }
-    }
-
-    std::string escape_xml(const std::string& str) {
-        std::string result;
-        for (char c : str) {
-            switch (c) {
-                case '&':
-                    result += "&amp;";
-                    break;
-                case '<':
-                    result += "&lt;";
-                    break;
-                case '>':
-                    result += "&gt;";
-                    break;
-                case '"':
-                    result += "&quot;";
-                    break;
-                case '\'':
-                    result += "&apos;";
-                    break;
-                default:
-                    result += c;
-                    break;
-            }
-        }
-        return result;
-    }
-
-    std::string escape_js(const std::string& str) {
-        std::string result;
-        for (char c : str) {
-            switch (c) {
-                case '\\':
-                    result += "\\\\";
-                    break;
-                case '\'':
-                    result += "\\'";
-                    break;
-                case '"':
-                    result += "\\\"";
-                    break;
-                case '\n':
-                    result += "\\n";
-                    break;
-                case '\r':
-                    result += "\\r";
-                    break;
-                case '\t':
-                    result += "\\t";
-                    break;
-                default:
-                    result += c;
-                    break;
-            }
-        }
-        return result;
     }
 
     void write_to_file(std::string_view output_file) {
@@ -1345,64 +1356,55 @@ class FlameGraphRendererFactory {
 class FlameGraphGenerator {
   private:
     FlameGraphConfig config_;
+    StackCollapseOptions collapse_opts_;
+    FlameGraphBuildOptions build_opts_;
 
   public:
     explicit FlameGraphGenerator(const FlameGraphConfig& config = {}) : config_(config) {
         config_.validate();
     }
 
-    void generate_from_raw(const std::string& raw_file, const std::string& out_file) {
+    void generate_from(std::string_view raw_file, std::string_view out_file) {
         auto parser = std::make_unique<AutoDetectParser>();
         StackCollapser collapser;
         FlameGraphBuilder builder;
         auto suffix = file_suffix(out_file);
         if (suffix.empty()) {
-            throw FlameGraphException("File suffix empty");
+            throw FlameGraphException(std::string("File suffix empty") + out_file.data());
         }
         auto renderer = FlameGraphRendererFactory::create(suffix);
 
         try {
+            MMapBuffer buffer(raw_file);
+
             // 解析原始数据
-            auto samples = parser->parse(raw_file);
+            std::vector<StackSample> samples = parser->parse(buffer.view());
 
             if (samples.empty()) {
                 throw FlameGraphException("No valid samples found in input file");
             }
 
-            std::cout << "Parsed " << samples.size() << " samples using " << parser->get_using_parser() << "\n";
-
             // 折叠堆栈
-            StackCollapseOptions collapse_opts;
-            // 可以根据配置设置折叠选项
-            auto folded = collapser.collapse(samples, collapse_opts);
+            CollapsedStack collapsed = collapser.collapse(samples, collapse_opts_);
 
-            if (folded.empty()) {
+            if (collapsed.empty()) {
                 throw FlameGraphException("No stacks remained after collapsing");
             }
 
             if (config_.write_folded_file) {
-                collapser.write_folded_file(folded, out_file + ".collapse");
+                collapser.write_folded_file(collapsed, std::string(out_file) + ".collapse");
             }
 
-            std::cout << "Collapsed to " << folded.size() << " unique stacks\n";
-
             // 构建树
-            FlameGraphBuildOptions build_opts;
-            build_opts.max_depth = config_.max_depth;
-            build_opts.prune_threshold = config_.min_heat_threshold;
+            build_opts_.max_depth = config_.max_depth;
+            build_opts_.prune_threshold = config_.min_heat_threshold;
+            auto root = builder.build_tree(collapsed, build_opts_);
 
-            auto tree = builder.build_tree(folded, build_opts);
-
-            if (tree->total_count == 0) {
+            if (root->total_count == 0) {
                 throw FlameGraphException("Tree has no samples");
             }
 
-            std::cout << "Built tree with " << tree->total_count << " total samples\n";
-
-            renderer->render(*tree, out_file);
-
-            std::cout << "Generated interactive flame graph: " << out_file << "\n";
-
+            renderer->render(*root, out_file);
         } catch (const std::exception& e) {
             throw FlameGraphException("Generation failed: " + std::string(e.what()));
         }

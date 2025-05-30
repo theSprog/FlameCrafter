@@ -14,7 +14,7 @@ CXXFLAGS += -Werror=uninitialized \
     -Wold-style-cast \
     -Werror=vla \
     -Wnon-virtual-dtor \
-    -Wreturn-local-addr 
+    -Wreturn-local-addr
 
 TARGET = flamegraph_main
 SOURCE = example_main.cpp
