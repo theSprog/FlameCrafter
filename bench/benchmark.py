@@ -35,10 +35,10 @@ PERF_FILE = "test_data.perf"
 console = Console()
 
 TOOLS: Dict[str, str] = {
-    "perl": "stackcollapse-perf.pl {input} | flamegraph.pl > {output}",
+    "Perl": "stackcollapse-perf.pl {input} | flamegraph.pl > {output}",
     "inferno": "inferno-collapse-perf {input} > inferno.folded && inferno-flamegraph inferno.folded > {output}",
-    "my_single": "./flamegraph_main {input} {output}",
-    "my_parallel": "./flamegraph_main_par {input} {output}",
+    "FlameCrafter_Single": "./flamegraph_main {input} {output}",
+    "FlameCrafter_Parallel": "./flamegraph_main_par {input} {output}",
 }
 
 DATASETS: List[tuple] = [
@@ -58,7 +58,7 @@ def save_bar_chart(rows, outfile: str = "benchmark_chart.svg"):
     rows: [{'tag': '1 K', 'perl': '12.9', 'inferno': '5.3', ...}, ...]
     """
     print(f"📊 Prepare generate chart to {outfile}")
-    tools = ["perl", "inferno", "my_single", "my_parallel"]
+    tools = ["Perl", "inferno", "FlameCrafter_Single", "FlameCrafter_Parallel"]
     colors = ["#4E79A7", "#59A14F", "#F28E2B", "#E15759"]
 
     n_rows = len(rows)
@@ -107,30 +107,30 @@ def show_tables(rows):
     # ── Rich 表格 ────────────────────────────────
     t = Table(title="Flame-graph Benchmark (mean, ms)", show_lines=True)
     t.add_column("Dataset", justify="right")
-    t.add_column("perl", justify="right")
+    t.add_column("Perl", justify="right")
     t.add_column("inferno", justify="right")
-    t.add_column("my_single", justify="right")
-    t.add_column("my_parallel", justify="right")
+    t.add_column("FlameCrafter_Single", justify="right")
+    t.add_column("FlameCrafter_Parallel", justify="right")
 
     for row in rows:
         t.add_row(
             row["tag"],
-            row.get("perl", "—"),
+            row.get("Perl", "—"),
             row.get("inferno", "—"),
-            row.get("my_single", "—"),
-            row.get("my_parallel", "—"),
+            row.get("FlameCrafter_Single", "—"),
+            row.get("FlameCrafter_Parallel", "—"),
         )
     console.print(t)
 
     # ── Markdown 输出 ────────────
     md = [
-        "| Dataset | perl | inferno | my_single | my_parallel |",
+        "| Dataset | Perl | inferno | FlameCrafter_Single | FlameCrafter_Parallel |",
         "|--------:|------:|--------:|----------:|------------:|",
     ]
     for r in rows:
         md.append(
-            f"| {r['tag']:>7} | {r.get('perl', '—'):>6} | {r.get('inferno', '—'):>8} | "
-            f"{r.get('my_single', '—'):>10} | {r.get('my_parallel', '—'):>12} |"
+            f"| {r['tag']:>7} | {r.get('Perl', '—'):>6} | {r.get('inferno', '—'):>8} | "
+            f"{r.get('FlameCrafter_Single', '—'):>10} | {r.get('FlameCrafter_Parallel', '—'):>12} |"
         )
 
     with open("benchmark_result.md", "w") as f:

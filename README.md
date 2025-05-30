@@ -94,13 +94,13 @@ int main(int argc, char* argv[]) {
   <img src="bench/benchmark_chart.svg">
 </div>
 
-| Dataset | Perl Flamegraph | inferno     | FlameCrafter (Single) | FlameCrafter (Parallel) |
-| ------- | --------------- | ----------- | --------------------- | ----------------------- |
-| 10      | 15.2 ms         | 4.0ms       | **1.1 ms**            | 2.3 ms                  |
-| 100     | 22.4 ms         | 5.1ms       | **4.1 ms**            | 4.4 ms                  |
-| 1 K     | 97.4 ms         | **12.2 ms** | 16.4 ms               | 19.2 ms                 |
-| 10 K    | 812.9 ms        | **77.6 ms** | 154.2 ms              | 104.0 ms                |
-| 100 K   | 3879.8 ms       | **177.5ms** | 1015.5 ms             | 466.9 ms                |
+| Dataset     | Perl        | inferno     | FlameCrafter_Single | FlameCrafter_Parallel |
+|------------:|------------:|------------:|------------:|------------:|
+|      10 |   18.9 |      5.0 |    **1.2** |          2.9 |
+|     100 |   26.9 |      5.6 |    **2.4** |          4.1 |
+|     1 K |   98.1 |     14.0 |   **13.8** |         19.2 |
+|    10 K |  790.4 |     94.3 |      125.4 |     **94.1** |
+|   100 K | 3942.4 | **197.6** |      818.1 |        505.9 |
 
 Although not faster than [inferno](https://github.com/jonhoo/inferno) in large dataset, **FlameCrafter** offers:
 
