@@ -40,9 +40,9 @@ cp -r include/ your_project/
 
 The typical workflow:
 
-1️⃣ **Collect stack samples** (with `perf` or `dtrace`)
-2️⃣ **Generate folded stacks** (with `perf script`, for example)
-3️⃣ **Build flamegraph**:
+- **Collect stack samples** (with `perf` or `dtrace`)
+- **Generate folded stacks** (with `perf script`, for example)
+- **Build flamegraph**:
 
 ```cpp
 #include "flamegraph.hpp"
