@@ -8,7 +8,8 @@ huge_*
 perf.*
 *.svg
 *.collapse
+*.json
+*.perf
 flamegraph_main_par
 inferno.folded
-out.perf
-out.perf.copy
+
