@@ -1,6 +1,6 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-A **C++17-powered** tool to generate beautiful, high-performance flamegraphs from `perf` or DTrace stack samples – **no more Perl**, no more slow Python scripts!
+A **C++17-powered** tool to generate beautiful, high-performance flamegraphs from `perf` or DTrace stack samples – **no more Perl**, no more slow [perl scripts](https://github.com/brendangregg/FlameGraph)!
 
 
 
