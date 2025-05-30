@@ -1,234 +1,228 @@
 #!/usr/bin/env python3
 """
-火焰图生成器性能基准测试脚本
-用于对比不同规模数据的处理性能
+bench/benchmark.py  ——  综合基准：
+1. stackcollapse-perf.pl + flamegraph.pl
+2. inferno-collapse-perf + inferno-flamegraph
+3. 自己的单核版  (./flamegraph_main)
+4. 自己的并行版  (./flamegraph_main_par)
+
+基准流程：
+• 生成 perf-script 测试数据
+• hyperfine 统一测量四个命令
+• 导出 JSON + 终端 Markdown 表格
 """
 
+import json
+import shutil
 import subprocess
-import time
-import os
 import sys
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import Dict, List
+from rich.console import Console
+from rich.table import Table
+import matplotlib
 
-class FlameGraphBenchmark:
-    def __init__(self):
-        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        self.test_configs = [
-            ("small", 1000, "1K"),
-            ("medium", 10000, "10K"), 
-            ("large", 100000, "100K"),
-        ]
-        print("BASE_DIR: ", BASE_DIR)
-        self.executable = os.path.join(BASE_DIR, "../flamegraph_main")
-        self.generate_data_script = os.path.join(BASE_DIR, "../script/generate_test_data.py")
-        
-    def ensure_executable_exists(self) -> bool:
-        """确保可执行文件存在"""
-        if not os.path.exists(self.executable):
-            print("❌ Executable not found. Building...")
-            result = subprocess.run(["make", "all"], capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"❌ Build failed: {result.stderr}")
-                return False
-            print("✅ Build successful")
-        return True
-    
-    def generate_test_data(self, size_name: str, sample_count: int) -> str:
-        """生成测试数据"""
-        test_file = f"{size_name}_test.txt"
-        
-        print(f"📊 Generating {size_name} test data ({sample_count:,} samples)...")
-        
-        cmd = [
-            "python3", self.generate_data_script, 
-            "--output", test_file,
-            "--samples", str(sample_count)
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to generate test data: {result.stderr}")
-        
-        return test_file
-    
-    def run_benchmark(self, input_file: str, output_file: str) -> Dict[str, float]:
-        """运行单个基准测试"""
-        # 预热运行
-        subprocess.run([self.executable, input_file, output_file], 
-                      capture_output=True, text=True)
-        
-        # 正式测试 - 运行3次取平均值
-        times = []
-        for i in range(3):
-            start_time = time.time()
-            result = subprocess.run(
-                [self.executable, input_file, output_file],
-                capture_output=True, text=True
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+# ---------- 配置 ---------- #
+BASE_DIR = Path(__file__).parent.resolve()
+DATA_GEN = BASE_DIR / "../script/generate_perf_samples.py"
+PERF_FILE = "test_data.perf"
+
+console = Console()
+
+TOOLS: Dict[str, str] = {
+    "perl": "stackcollapse-perf.pl {input} | flamegraph.pl > {output}",
+    "inferno": "inferno-collapse-perf {input} > inferno.folded && inferno-flamegraph inferno.folded > {output}",
+    "my_single": "./flamegraph_main {input} {output}",
+    "my_parallel": "./flamegraph_main_par {input} {output}",
+}
+
+DATASETS: List[tuple] = [
+    ("cute", 1_0, "10"),
+    ("small", 1_00, "100"),
+    ("medium", 1_000, "1 K"),
+    ("large", 10_000, "10 K"),
+    ("huge", 1_000_00, "100 K"),
+    # ("gigantic", 10_000_00, "1 M"),
+]
+
+HYPERFINE_COMMON = ["--warmup", "3", "--runs", "10", "--ignore-failure", "--show-output"]
+
+
+def save_bar_chart(rows, outfile: str = "benchmark_chart.svg"):
+    """
+    rows: [{'tag': '1 K', 'perl': '12.9', 'inferno': '5.3', ...}, ...]
+    """
+    print(f"📊 Prepare generate chart to {outfile}")
+    tools = ["perl", "inferno", "my_single", "my_parallel"]
+    colors = ["#4E79A7", "#59A14F", "#F28E2B", "#E15759"]
+
+    n_rows = len(rows)
+    fig, axs = plt.subplots(1, n_rows, figsize=(4 * n_rows, 5), sharey=False)
+
+    # 如果只有一个标签，axs 不是列表，需要统一
+    if n_rows == 1:
+        axs = [axs]
+
+    for idx, row in enumerate(rows):
+        ax = axs[idx]
+        x_indexes = np.arange(len(tools))
+        values = [float(row.get(t, "nan")) for t in tools]
+
+        bars = ax.bar(x_indexes, values, color=colors, width=0.6)
+
+        ax.set_title(f"Benchmark: {row['tag']} samples")
+        ax.set_xticks(x_indexes)
+        ax.set_xticklabels(tools, rotation=45, ha="right")
+        ax.set_ylabel("Mean time (ms)")
+
+        # 可选：根据数值范围灵活调整 y 轴范围
+        max_val = max(values)
+        ax.set_ylim(0, max_val * 1.2)
+
+        # 在柱子顶部标注数值
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(
+                f"{height:.1f}",
+                xy=(bar.get_x() + bar.get_width() / 2, height),
+                xytext=(0, 3),  # 垂直偏移
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8,
             )
-            end_time = time.time()
-            
-            if result.returncode != 0:
-                raise RuntimeError(f"Benchmark failed: {result.stderr}")
-            
-            times.append(end_time - start_time)
-        
-        # 计算统计数据
-        avg_time = sum(times) / len(times)
-        min_time = min(times)
-        max_time = max(times)
-        
-        return {
-            "avg": avg_time,
-            "min": min_time, 
-            "max": max_time,
-            "times": times
-        }
-    
-    def get_file_info(self, filename: str) -> Dict[str, any]:
-        """获取文件信息"""
-        if not os.path.exists(filename):
-            return {"size": 0, "lines": 0}
-        
-        file_size = os.path.getsize(filename)
-        
-        # 计算行数
-        line_count = 0
-        with open(filename, 'r') as f:
-            for _ in f:
-                line_count += 1
-        
-        return {
-            "size": file_size,
-            "lines": line_count
-        }
-    
-    def format_time(self, seconds: float) -> str:
-        """格式化时间显示"""
-        if seconds < 1:
-            return f"{seconds*1000:.1f}ms"
-        else:
-            return f"{seconds:.2f}s"
-    
-    def format_size(self, bytes_size: int) -> str:
-        """格式化文件大小"""
-        if bytes_size < 1024:
-            return f"{bytes_size}B"
-        elif bytes_size < 1024 * 1024:
-            return f"{bytes_size/1024:.1f}KB"
-        else:
-            return f"{bytes_size/1024/1024:.1f}MB"
-    
-    def run_all_benchmarks(self) -> List[Tuple[str, Dict]]:
-        """运行所有基准测试"""
-        results = []
-        
-        print("🔥 Starting Flame Graph Performance Benchmark")
-        print("=" * 50)
-        
-        for size_name, sample_count, display_name in self.test_configs:
-            print(f"\n📊 Testing {display_name} dataset...")
-            print("-" * 30)
-            
-            try:
-                # 生成测试数据
-                input_file = self.generate_test_data(size_name, sample_count)
-                output_file = f"{size_name}_benchmark.svg"
-                
-                # 获取输入文件信息
-                file_info = self.get_file_info(input_file)
-                print(f"   Input file: {self.format_size(file_info['size'])}, {file_info['lines']:,} lines")
-                
-                # 运行基准测试
-                print("   Running benchmark...")
-                benchmark_result = self.run_benchmark(input_file, output_file)
-                
-                # 获取输出文件信息
-                output_info = self.get_file_info(output_file)
-                
-                # 记录结果
-                result = {
-                    "size_name": size_name,
-                    "display_name": display_name,
-                    "sample_count": sample_count,
-                    "input_size": file_info["size"],
-                    "input_lines": file_info["lines"],
-                    "output_size": output_info["size"],
-                    "benchmark": benchmark_result
-                }
-                results.append((display_name, result))
-                
-                # 显示结果
-                print(f"   ✅ Average time: {self.format_time(benchmark_result['avg'])}")
-                print(f"   📈 Range: {self.format_time(benchmark_result['min'])} - {self.format_time(benchmark_result['max'])}")
-                print(f"   📄 Output SVG: {self.format_size(output_info['size'])}")
-                
-                # 计算处理速度
-                samples_per_sec = sample_count / benchmark_result['avg']
-                print(f"   ⚡ Processing rate: {samples_per_sec:,.0f} samples/sec")
-                
-            except Exception as e:
-                print(f"   ❌ Failed: {e}")
-                continue
-        
-        return results
-    
-    def print_summary(self, results: List[Tuple[str, Dict]]):
-        """打印测试总结"""
-        if not results:
-            print("\n❌ No benchmark results to summarize")
-            return
-        
-        print("\n" + "=" * 60)
-        print("🏆 BENCHMARK SUMMARY")
-        print("=" * 60)
-        
-        print(f"{'Dataset':<10} {'Samples':<10} {'Input':<10} {'Time':<12} {'Rate':<15} {'Output':<10}")
-        print("-" * 70)
-        
-        for display_name, result in results:
-            avg_time = result["benchmark"]["avg"]
-            rate = result["sample_count"] / avg_time
-            
-            print(f"{display_name:<10} "
-                  f"{result['sample_count']:>9,} "
-                  f"{self.format_size(result['input_size']):<10} "
-                  f"{self.format_time(avg_time):<12} "
-                  f"{rate:>10,.0f} smp/s "
-                  f"{self.format_size(result['output_size']):<10}")
-        
-        # 性能分析
-        if len(results) >= 2:
-            print(f"\n📈 Performance Analysis:")
-            small_rate = results[0][1]["sample_count"] / results[0][1]["benchmark"]["avg"]
-            for i in range(1, len(results)):
-                current_rate = results[i][1]["sample_count"] / results[i][1]["benchmark"]["avg"]
-                ratio = current_rate / small_rate
-                print(f"   {results[i][0]} is {ratio:.1f}x as efficient as {results[0][0]} (per sample)")
 
+    plt.suptitle("Flame-graph benchmark (by tag)")
+    plt.tight_layout(rect=[0, 0, 1, 0.95])  # 留出 suptitle 空间
+    plt.savefig(outfile, format="svg")
+    print(f"📊 Chart saved to {outfile}")
+
+
+def show_tables(rows):
+    # ── Rich 表格 ────────────────────────────────
+    t = Table(title="Flame-graph Benchmark (mean, ms)", show_lines=True)
+    t.add_column("Dataset", justify="right")
+    t.add_column("perl", justify="right")
+    t.add_column("inferno", justify="right")
+    t.add_column("my_single", justify="right")
+    t.add_column("my_parallel", justify="right")
+
+    for row in rows:
+        t.add_row(
+            row["tag"],
+            row.get("perl", "—"),
+            row.get("inferno", "—"),
+            row.get("my_single", "—"),
+            row.get("my_parallel", "—"),
+        )
+    console.print(t)
+
+    # ── Markdown 输出 ────────────
+    md = [
+        "| Dataset | perl | inferno | my_single | my_parallel |",
+        "|--------:|------:|--------:|----------:|------------:|",
+    ]
+    for r in rows:
+        md.append(
+            f"| {r['tag']:>7} | {r.get('perl', '—'):>6} | {r.get('inferno', '—'):>8} | "
+            f"{r.get('my_single', '—'):>10} | {r.get('my_parallel', '—'):>12} |"
+        )
+
+    with open("benchmark_result.md", "w") as f:
+        f.write("\n".join(md))
+        f.write("\n")
+
+    console.print("✅ Markdown table saved to benchmark_result.md")
+
+
+# ---------- 工具检测 ---------- #
+def ensure_binary(prog: str) -> bool:
+    return shutil.which(prog) is not None
+
+
+def sanity_check():
+    missing = []
+    if not ensure_binary("hyperfine"):
+        missing.append("hyperfine")
+    if not ensure_binary("stackcollapse-perf.pl") or not ensure_binary("flamegraph.pl"):
+        missing.append("FlameGraph perl scripts")
+    if not ensure_binary("inferno-collapse-perf") or not ensure_binary("inferno-flamegraph"):
+        missing.append("inferno tools")
+    if missing:
+        sys.exit(f"❌ dependency miss：{', '.join(missing)} — install it first")
+
+
+# ---------- 生成 perf-script ---------- #
+def gen_perf(samples: int):
+    print(f"📦 Generate {samples:,} samples …")
+    subprocess.run(
+        ["python3", str(DATA_GEN), "--samples", str(samples), "--output", PERF_FILE],
+        check=True,
+    )
+
+
+# ---------- run hyperfine ---------- #
+def run_hyperfine(tag: str):
+    json_out = f"benchmark_{tag}.json"
+    cmd_list = []
+    for name, tmpl in TOOLS.items():
+        svg = f"{tag}_{name}.svg"
+        if "|" in tmpl or ">" in tmpl:
+            cmd_list.append(f"sh -c '{tmpl.format(input=PERF_FILE, output=svg)}'")
+        else:
+            cmd_list.append(tmpl.format(input=PERF_FILE, output=svg))
+
+    hyper_cmd = ["hyperfine", *HYPERFINE_COMMON, "--export-json", json_out, *cmd_list]
+    print(f"🚀 hyperfine ({tag}) …")
+    subprocess.run(hyper_cmd, check=True)
+    return json_out
+
+
+def mean_ms(result: dict) -> str:
+    return f"{result['mean'] * 1000:.1f}"
+
+
+def parse_json(js_file: str) -> Dict[str, float]:
+    with open(js_file) as f:
+        data = json.load(f)
+    out = {}
+    for item in data["results"]:
+        cmd = item["command"]
+        key = None
+        for k in TOOLS:
+            if k in cmd:
+                key = k
+                break
+        if key:
+            out[key] = mean_ms(item)
+    return out
+
+
+# ---------- 主入口 ---------- #
 def main():
-    benchmark = FlameGraphBenchmark()
-    
-    # 检查环境
-    if not benchmark.ensure_executable_exists():
-        return 1
-    
-    try:
-        # 运行基准测试
-        results = benchmark.run_all_benchmarks()
-        
-        # 打印总结
-        benchmark.print_summary(results)
-        
-        print(f"\n🎉 Benchmark completed! Generated {len(results)} test results.")
-        
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Benchmark interrupted by user")
-        return 1
-    except Exception as e:
-        print(f"\n❌ Benchmark failed: {e}")
-        return 1
-    
-    return 0
+    sanity_check()
+
+    summary_rows = []
+
+    for tag, samples, disp in DATASETS:
+        print("\n" + "=" * 60)
+        print(f"🔬 Benchmark {disp} ({samples:,} samples)")
+        print("=" * 60)
+        gen_perf(samples)
+        js = run_hyperfine(tag)
+        res = parse_json(js)
+        row = {"tag": disp, **res}
+        summary_rows.append(row)
+
+    print("\n🏁 All benchmark finished!\n")
+    show_tables(summary_rows)
+    save_bar_chart(summary_rows)
+
 
 if __name__ == "__main__":
-    exit(main())
+    main()

@@ -16,8 +16,10 @@ CXXFLAGS += -Werror=uninitialized \
     -Wnon-virtual-dtor \
     -Wreturn-local-addr
 
-TARGET = flamegraph_main
-SOURCE = example_main.cpp
+TBB_LIBS  = -ltbb
+
+TARGET = flamegraph_main flamegraph_main_par
+SOURCE = example_main.cpp example_main_par.cpp
 HEADER_DIR = include
 HEADER = $(HEADER_DIR)/flamegraph.hpp
 BUILD_DIR = build
@@ -26,48 +28,55 @@ BUILD_DIR = build
 all: $(TARGET)
 
 # Build the example
-$(TARGET): $(SOURCE) $(HEADER)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SOURCE)
+flamegraph_main: example_main.cpp $(HEADER)
+	$(CXX) $(CXXFLAGS) -o $@ $<
+
+flamegraph_main_par: example_main_par.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) -o $@ $< $(TBB_LIBS)
 
 # Run the example
-run: $(TARGET)
-	./$(TARGET)
+run: flamegraph_main
+	./flamegraph_main
+
+run-par: flamegraph_main_par
+	./flamegraph_main_par
 
 # Clean generated files
 clean:
 	rm -f $(TARGET)
-	rm -f *.svg *.html
-	rm -f *.txt
+	rm -f *.svg *.html *.json
+	rm -f *.txt *.perf
 	rm -f *.folded
 	rm -f *_test.txt *_flamegraph.html *_flamegraph.svg
 	rm -f *.collapse
 	rm -f flamegraph.svg
 	find build/ -type f ! -name 'holder' -exec rm -f {} +
+	rm -f perf.data*
 
 # Performance tests with different data sizes
-perf-small: $(TARGET)
+perf-small: $(TARGETS)
 	@echo "🔥 Small performance test (1K samples)..."
 	python3 script/generate_test_data.py --small
-	@time ./$(TARGET) small_test.txt $(BUILD_DIR)/small_flamegraph.html 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
-	@time ./$(TARGET) small_test.txt $(BUILD_DIR)/small_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./flamegraph_main small_test.txt $(BUILD_DIR)/small_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./flamegraph_main_par small_test.txt $(BUILD_DIR)/small_flamegraph_par.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
 
-perf-medium: $(TARGET)
+perf-medium: $(TARGETS)
 	@echo "🔥 Medium performance test (10K samples)..."
 	python3 script/generate_test_data.py --medium
-	@time ./$(TARGET) medium_test.txt $(BUILD_DIR)/medium_flamegraph.html 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
-	@time ./$(TARGET) medium_test.txt $(BUILD_DIR)/medium_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./flamegraph_main medium_test.txt $(BUILD_DIR)/medium_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./flamegraph_main_par medium_test.txt $(BUILD_DIR)/medium_flamegraph_par.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
 
-perf-large: $(TARGET)
+perf-large: $(TARGETS)
 	@echo "🔥 Large performance test (100K samples)..."
 	python3 script/generate_test_data.py --large
-	@time ./$(TARGET) large_test.txt $(BUILD_DIR)/large_flamegraph.html 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
-	@time ./$(TARGET) large_test.txt $(BUILD_DIR)/large_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./flamegraph_main large_test.txt $(BUILD_DIR)/large_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./flamegraph_main_par large_test.txt $(BUILD_DIR)/large_flamegraph_par.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
 
-perf-huge: $(TARGET)
+perf-huge: $(TARGETS)
 	@echo "🔥 Huge performance test (1M samples)..."
 	python3 script/generate_test_data.py --huge
-	@time ./$(TARGET) huge_test.txt $(BUILD_DIR)/huge_flamegraph.html 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
-	@time ./$(TARGET) huge_test.txt $(BUILD_DIR)/huge_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./flamegraph_main huge_test.txt $(BUILD_DIR)/huge_flamegraph.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
+	@time ./flamegraph_main_par huge_test.txt $(BUILD_DIR)/huge_flamegraph_par.svg 2>/dev/null || echo "❌ Note: Modify main.cpp to accept command line arguments"
 
 # Run all performance tests
 perf-all: perf-small perf-medium perf-large perf-huge
@@ -80,15 +89,16 @@ benchmark: $(TARGET)
 # Help
 help:
 	@echo "Available targets:"
-	@echo "  all           - Build the example program"
-	@echo "  run           - Build and run the example"
-	@echo "  clean         - Remove all generated files"
-	@echo "  perf-small    - Performance test with 1K samples"
-	@echo "  perf-medium   - Performance test with 10K samples"
-	@echo "  perf-large    - Performance test with 100K samples"
-	@echo "  perf-huge     - Performance test with 1M samples"
-	@echo "  perf-all      - Run all performance tests"
-	@echo "  benchmark     - Run comprehensive benchmark"
-	@echo "  help          - Show this help message"
+	@echo "  all            - Build both flamegraph_main and flamegraph_main_par"
+	@echo "  run            - Run flamegraph_main"
+	@echo "  run-par        - Run flamegraph_main_par"
+	@echo "  clean          - Remove all generated files"
+	@echo "  perf-small     - Small performance test"
+	@echo "  perf-medium    - Medium performance test"
+	@echo "  perf-large     - Large performance test"
+	@echo "  perf-huge      - Huge performance test"
+	@echo "  perf-all       - Run all performance tests"
+	@echo "  benchmark      - Run comprehensive benchmark"
+	@echo "  help           - Show this help message"
 
 .PHONY: all run clean clean-svg install generate-data perf-small perf-medium perf-large perf-all benchmark help
