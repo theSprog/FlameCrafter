@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <regex>
 #include <cassert>
+#include <charconv>
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -165,6 +166,109 @@ inline uintmax_t get_file_size(std::string_view filename) {
     return std::filesystem::file_size(filename);
 }
 } // namespace
+
+class StringBuilder {
+  private:
+    std::string buffer_;
+    bool fixed_format_ = false;
+    std::streamsize precision_ = 6;
+
+  public:
+    explicit StringBuilder(size_t reserve_size = 1024) {
+        buffer_.reserve(reserve_size);
+    }
+
+    void reserve(size_t reserve_size) {
+        buffer_.reserve(reserve_size);
+    }
+
+    StringBuilder& operator<<(char c) {
+        buffer_.push_back(c);
+        return *this;
+    }
+
+    StringBuilder& operator<<(const char* str) {
+        buffer_.append(str);
+        return *this;
+    }
+
+    StringBuilder& operator<<(const std::string& str) {
+        buffer_.append(str);
+        return *this;
+    }
+
+    StringBuilder& operator<<(std::string_view sv) {
+        buffer_.append(sv);
+        return *this;
+    }
+
+    StringBuilder& operator<<(int value) {
+        // 使用 to_chars (C++17) 而不是 to_string, 性能更高
+        char temp[32];
+        auto result = std::to_chars(temp, temp + sizeof(temp), value);
+        buffer_.append(temp, result.ptr - temp);
+        return *this;
+    }
+
+    StringBuilder& operator<<(double value) {
+        char temp[64];
+        std::to_chars_result result;
+
+        if (fixed_format_) {
+            result =
+                std::to_chars(temp, temp + sizeof(temp), value, std::chars_format::fixed, static_cast<int>(precision_));
+        } else {
+            result = std::to_chars(temp,
+                                   temp + sizeof(temp),
+                                   value,
+                                   std::chars_format::general,
+                                   static_cast<int>(precision_));
+        }
+
+        buffer_.append(temp, result.ptr - temp);
+        return *this;
+    }
+
+    StringBuilder& operator<<(float value) {
+        return *this << static_cast<double>(value);
+    }
+
+    template <typename T>
+    StringBuilder& operator<<(const T& manip) {
+        // 确保不是基本类型被误匹配到这里
+        static_assert(! std::is_arithmetic_v<T>, "Arithmetic types should have explicit overloads");
+        static_assert(! std::is_convertible_v<T, const char*>, "char pointers should have explicit overloads");
+
+        // 用临时 ostringstream 来解析操纵符
+        std::ostringstream temp;
+        temp << manip;
+
+        // 检查是否是 fixed 格式
+        if (temp.flags() & std::ios_base::fixed) {
+            fixed_format_ = true;
+        }
+
+        // 获取精度
+        precision_ = temp.precision();
+
+        return *this;
+    }
+
+    std::string str() && {
+        // move 移除内部成员
+        return std::move(buffer_);
+    }
+
+    void clear() {
+        buffer_.clear();
+        fixed_format_ = false;
+        precision_ = 6;
+    }
+
+    const std::string& str() const& {
+        return buffer_;
+    }
+};
 
 struct MMapBuffer {
     void* addr;
@@ -971,7 +1075,8 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
   private:
 #include "embed/flamegraph_js_embed.hpp" // FLAMEGRAPH_JS 变量可用
 
-    std::ostringstream svg_content_;
+    // std::ostringstream svg_content_;
+    StringBuilder svg_content_;
     std::unique_ptr<ColorScheme> color_scheme_;
     size_t total_samples_ = 0;
     int max_depth_ = 0;
@@ -987,14 +1092,25 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         }
 
         total_samples_ = root.total_count;
-        max_depth_ = calculate_tree_height(root);
+        // 提前预留内存
+        size_t reserve_size = estimate_reserve_size(total_samples_);
+        svg_content_.reserve(reserve_size);
+
+        // 写入 svg
+        write_svg(root);
+
+        // 写入文件
+        write_to_file(output_file);
+    }
+
+  private:
+    void write_svg(const FlameNode& root) {
+        // 清空内容
+        svg_content_.clear();
 
         // 计算图像高度
+        max_depth_ = calculate_tree_height(root);
         int imageheight = calculate_image_height();
-
-        // 清空内容
-        svg_content_.str("");
-        svg_content_.clear();
 
         // 写入 SVG
         write_svg_header(imageheight);
@@ -1017,14 +1133,16 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
 
         svg_content_ << "</g>\n";
         svg_content_ << "</svg>\n";
-
-        // 写入文件
-        write_to_file(output_file);
     }
 
-  private:
     void setup_color_scheme() {
         color_scheme_ = ColorSchemeFactory::create(config_.colors);
+    }
+
+    size_t estimate_reserve_size(size_t sample_count) {
+        size_t bytes_per_node = 514;   // 平均每个 Frame: 需要 400-600 字节
+        size_t fixed_overhead = 15000; // 固定开销（主要是JS）
+        return fixed_overhead + (sample_count * bytes_per_node);
     }
 
     int calculate_image_height() const {
@@ -1237,7 +1355,32 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         svg_content_ << "</g>\n";
     }
 
-    void escape_xml_to_stream(std::string_view str, std::ostream& os) {
+    void escape_xml_to_stream(std::string_view str, StringBuilder& os) {
+        for (char c : str) {
+            switch (c) {
+                case '&':
+                    os << "&amp;";
+                    break;
+                case '<':
+                    os << "&lt;";
+                    break;
+                case '>':
+                    os << "&gt;";
+                    break;
+                case '"':
+                    os << "&quot;";
+                    break;
+                case '\'':
+                    os << "&apos;";
+                    break;
+                default:
+                    os << c;
+                    break;
+            }
+        }
+    }
+
+    void escape_xml_to_stream(std::string_view str, std::ostringstream& os) {
         for (char c : str) {
             switch (c) {
                 case '&':

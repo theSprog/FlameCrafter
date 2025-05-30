@@ -96,11 +96,11 @@ int main(int argc, char* argv[]) {
 
 | Dataset | Perl Flamegraph | inferno     | FlameCrafter (Single) | FlameCrafter (Parallel) |
 | ------- | --------------- | ----------- | --------------------- | ----------------------- |
-| 10      | 15.2 ms         | 4.3ms       | **1.2 ms**            | 2.5 ms                  |
-| 100     | 25.6 ms         | 6.3ms       | **3.0 ms**            | 5.1 ms                  |
-| 1 K     | 100.9 ms        | **14.9 ms** | 18.0 ms               | 21.5 ms                 |
-| 10 K    | 780.7 ms        | **93.1ms**  | 161.4 ms              | 114.3 ms                |
-| 100 K   | 3768.8 ms       | **193.5ms** | 1020.1 ms             | 501.4 ms                |
+| 10      | 15.2 ms         | 4.0ms       | **1.1 ms**            | 2.3 ms                  |
+| 100     | 22.4 ms         | 5.1ms       | **4.1 ms**            | 4.4 ms                  |
+| 1 K     | 97.4 ms         | **12.2 ms** | 16.4 ms               | 19.2 ms                 |
+| 10 K    | 812.9 ms        | **77.6 ms** | 154.2 ms              | 104.0 ms                |
+| 100 K   | 3879.8 ms       | **177.5ms** | 1015.5 ms             | 466.9 ms                |
 
 Although not faster than [inferno](https://github.com/jonhoo/inferno) in large dataset, **FlameCrafter** offers:
 
