@@ -102,7 +102,7 @@ int main(int argc, char* argv[]) {
 |   100 K | 4110.9 |    **203.9** |      284.6 |        477.0 |
 
 
-Although not faster than [inferno](https://github.com/jonhoo/inferno) in large dataset, **FlameCrafter** offers:
+Although not faster than [inferno](https://github.com/jonhoo/inferno) in large dataset(Parallel is not optimize now, `JUST TODO`), **FlameCrafter** offers:
 
 * 🏗️ **Header-only simplicity** – no build, no external runtime
 * 🎯 **C++17 efficiency** – tight memory usage and zero-cost abstractions
