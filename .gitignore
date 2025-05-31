@@ -13,3 +13,4 @@ perf.*
 flamegraph_main_par
 inferno.folded
 
+benchmark_result.md
