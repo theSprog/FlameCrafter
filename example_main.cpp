@@ -16,7 +16,7 @@ int main(int argc, char* argv[]) {
             FlameGraphGenerator generator(config);
 
             auto start = std::chrono::high_resolution_clock::now();
-            generator.generate_from(argv[1], argv[2]);
+            generator.generate(argv[1], argv[2]);
             auto end = std::chrono::high_resolution_clock::now();
 
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);

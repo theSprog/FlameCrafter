@@ -15,7 +15,7 @@ int main(int argc, char* argv[]) {
 
         auto start = std::chrono::high_resolution_clock::now();
         flamegraph::ParallelFlameGraphGenerator parallel_generator(config);
-        parallel_generator.generate_from(argv[1], argv[2]);
+        parallel_generator.generate(argv[1], argv[2]);
         auto end = std::chrono::high_resolution_clock::now();
 
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);

@@ -113,16 +113,16 @@ private:
             
             if (line.empty()) {
                 if (reading_stack) {
-                    push_valid_sample(samples, current_sample);
+                    PerfScriptParser::push_valid_sample(samples, current_sample);
                 }
                 reading_stack = false;
             } else {
-                parse_line(line, current_sample, reading_stack);
+                PerfScriptParser::parse_line(line, current_sample, reading_stack);
             }
         }
         
         if (reading_stack) {
-            push_valid_sample(samples, current_sample);
+            PerfScriptParser::push_valid_sample(samples, current_sample);
         }
         
         return samples;
@@ -153,100 +153,20 @@ private:
             
             if (line.empty()) {
                 if (reading_stack) {
-                    push_valid_sample(samples, current_sample);
+                    PerfScriptParser::push_valid_sample(samples, current_sample);
                 }
                 reading_stack = false;
             } else {
-                parse_line(line, current_sample, reading_stack);
+                PerfScriptParser::parse_line(line, current_sample, reading_stack);
             }
         }
         
         // 如果是最后一个块且正在读取堆栈，保存它
         if (block_idx == num_blocks - 1 && reading_stack) {
-            push_valid_sample(samples, current_sample);
+            PerfScriptParser::push_valid_sample(samples, current_sample);
         }
         
         return samples;
-    }
-    
-    // 复用原有的辅助方法
-    void parse_sample_header(std::string_view line_view, StackSample& sample) {
-        auto parts = split(line_view, ' ');
-        if (!parts.empty()) {
-            sample.process_name = parts[0];
-        }
-        
-        std::regex timestamp_regex(R"((\d+\.\d+):)");
-        std::cmatch match;
-        if (std::regex_search(line_view.begin(), line_view.end(), match, timestamp_regex)) {
-            sample.timestamp = static_cast<uint64_t>(std::stod(match[1].str()) * 1000000);
-        }
-    }
-    
-    Frame parse_perf_stack_frame(std::string_view line) {
-        size_t first_space = line.find(' ');
-        if (first_space == std::string::npos) return Frame{};
-        
-        std::string_view content = line.substr(first_space + 1);
-        std::string_view func_name{};
-        std::string_view lib_name{};
-        bool lib_include_brackets = false;
-        
-        size_t paren_start = content.rfind('(');
-        size_t paren_end = content.find(')', paren_start);
-        
-        if (paren_start != std::string::npos && paren_end != std::string::npos) {
-            lib_name = content.substr(paren_start + 1, paren_end - paren_start - 1);
-            func_name = trim(content.substr(0, paren_start));
-        } else {
-            func_name = content;
-        }
-        
-        if (func_name != "[unknown]") {
-            size_t plus_pos = func_name.find('+');
-            if (plus_pos != std::string::npos) {
-                func_name = func_name.substr(0, plus_pos);
-            }
-        }
-        
-        if (!lib_name.empty()) {
-            size_t last_slash = lib_name.find_last_of('/');
-            if (last_slash != std::string::npos) {
-                lib_name = lib_name.substr(last_slash + 1);
-            }
-            
-            if (lib_name.front() == '[' && lib_name.back() == ']') {
-                lib_include_brackets = true;
-            }
-        }
-        
-        if (!func_name.empty() && func_name != "[unknown]") {
-            return Frame(func_name);
-        } else {
-            return Frame{lib_name, false, lib_include_brackets};
-        }
-    }
-    
-    void push_valid_sample(std::vector<StackSample>& samples, StackSample& current_sample) {
-        if (!current_sample.frames.empty()) {
-            std::reverse(current_sample.frames.begin(), current_sample.frames.end());
-            if (current_sample.is_valid()) {
-                samples.push_back(std::move(current_sample));
-            }
-            current_sample = StackSample();
-        }
-    }
-    
-    void parse_line(std::string_view line_view, StackSample& current_sample, bool& reading_stack) {
-        if (!reading_stack && line_view.find(':') != std::string_view::npos) {
-            parse_sample_header(line_view, current_sample);
-            reading_stack = true;
-        } else if (reading_stack) {
-            Frame frame = parse_perf_stack_frame(line_view);
-            if (!frame.empty()) {
-                current_sample.frames.push_back(frame);
-            }
-        }
     }
 };
 
@@ -409,7 +329,7 @@ public:
         config_.validate();
     }
     
-    void generate_from(std::string_view raw_file, std::string_view out_file) {
+    void generate(std::string_view in_file, std::string_view out_file) {
         auto parser = std::make_unique<ParallelAutoDetectParser>();
         ParallelStackCollapser collapser;
         FlameGraphBuilder builder;
@@ -420,7 +340,7 @@ public:
         auto renderer = FlameGraphRendererFactory::create(suffix);
         
         try {
-            MMapBuffer buffer(raw_file);
+            MMapBuffer buffer(in_file);
             
             // 并行解析原始数据
             std::vector<StackSample> samples = parser->parse(buffer.view());
@@ -443,13 +363,15 @@ public:
             // 构建树（这部分较难并行化，保持原样）
             build_opts_.max_depth = config_.max_depth;
             build_opts_.prune_threshold = config_.min_heat_threshold;
-            auto root = builder.build_tree(collapsed, build_opts_);
+            FlameNode* root = builder.build_tree(collapsed, build_opts_);
             
             if (root->total_count == 0) {
                 throw FlameGraphException("Tree has no samples");
             }
             
             renderer->render(*root, out_file);
+
+            root->destroy_tree();
         } catch (const std::exception& e) {
             throw FlameGraphException("Generation failed: " + std::string(e.what()));
         }

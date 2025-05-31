@@ -56,12 +56,11 @@ int main(int argc, char* argv[]) {
     config.write_folded_file = false;
 
     FlameGraphGenerator generator(config);
-    generator.generate_from("perf.parsed", "my_flamegraph.svg");
-    generator.generate_from("perf.parsed", "my_flamegraph.html");	// generate .html
+    generator.generate("perf.parsed", "my_flamegraph.svg");
+    generator.generate("perf.parsed", "my_flamegraph.html");	// generate .html
     return 0;
 }
 ```
-
 
 
 🔥 **Parallel rendering** is enabled by default if `TBB` is available. All you need is to use `ParallelFlameGraphGenerator` instead if `FlameGraphGenerator`
@@ -78,8 +77,8 @@ int main(int argc, char* argv[]) {
     config.write_folded_file = false;
 
     ParallelFlameGraphGenerator generator(config);
-    generator.generate_from("perf.parsed", "my_flamegraph.svg");
-    generator.generate_from("perf.parsed", "my_flamegraph.html");	// generate .html
+    generator.generate("perf.parsed", "my_flamegraph.svg");
+    generator.generate("perf.parsed", "my_flamegraph.html");	// generate .html
     return 0;
 }
 ```
