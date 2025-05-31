@@ -6,7 +6,6 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
-#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -22,8 +21,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <fcntl.h>
-
-#include <absl/container/flat_hash_map.h>
 
 namespace flamegraph {
 class FlameGraphException : public std::runtime_error {
@@ -343,9 +340,16 @@ struct TreeStats {
 };
 
 struct Frame {
+    std::string_view name; // 底层零拷贝视图
+    bool is_func;
+    bool lib_include_brackets;           // 是否已经加了 [xxx]
+    mutable size_t precomputed_hash = 0; // 预先算好 hash
+
+    // 可扩展字段: pid, 线程id, 采样率等
+
     struct Hasher {
         size_t operator()(const Frame& f) const noexcept {
-            return f.compute_hash();
+            return f.computed_hash();
         }
     };
 
@@ -362,23 +366,16 @@ struct Frame {
         return lib_include_brackets < other.lib_include_brackets;
     }
 
-    std::string_view name; // 底层零拷贝视图
-    bool is_func;
-    bool lib_include_brackets;           // 是否已经加了 [xxx]
-    mutable size_t precomputed_hash = 0; // 预先算好 hash
-
-    // 可扩展字段: pid, 线程id, 采样率等
+    bool operator==(const Frame& other) const noexcept {
+        return is_func == other.is_func && lib_include_brackets == other.lib_include_brackets && name == other.name;
+    }
 
     Frame() : Frame("") {}
 
     explicit Frame(std::string_view name, bool is_func = true, bool lib_include_brackets = false)
         : name(name), is_func(is_func), lib_include_brackets(lib_include_brackets) {}
 
-    bool operator==(const Frame& other) const noexcept {
-        return name == other.name && is_func == other.is_func && lib_include_brackets == other.lib_include_brackets;
-    }
-
-    size_t compute_hash() const noexcept {
+    size_t computed_hash() const noexcept {
         if (precomputed_hash == 0) {
             size_t h1 = std::hash<std::string_view>{}(name);
             size_t h2 = std::hash<bool>{}(is_func);
@@ -408,17 +405,35 @@ struct Frame {
 };
 
 struct FlameNode {
-    Frame frame;
+    struct FramePtrHasher {
+        size_t operator()(const Frame* f) const noexcept {
+            return Frame::Hasher{}(*f);
+        }
+    };
+
+    struct FramePtrEqual {
+        bool operator()(const Frame* a, const Frame* b) const noexcept {
+            return *a == *b;
+        }
+    };
+
+    struct FramePtrLess {
+        bool operator()(const Frame* a, const Frame* b) const noexcept {
+            return *a < *b;
+        }
+    };
+
+    const Frame* frame;
     size_t self_count = 0;
     size_t total_count = 0;
-    // std::unordered_map<const Frame, FlameNode*, Frame::Hasher> children;
-    std::map<const Frame, FlameNode*> children;
+    std::unordered_map<const Frame*, FlameNode*, FramePtrHasher, FramePtrEqual> children;
     FlameNode* parent = nullptr; // 父节点指针
     int height = 1;              // 默认自己在 1 层
 
-    explicit FlameNode(Frame frame) : frame(frame) {}
+    explicit FlameNode() : frame(nullptr) {}
 
-    FlameNode() = delete;
+    explicit FlameNode(const Frame* frame) : frame(frame) {}
+
     // 禁用拷贝/移动构造函数
     FlameNode(FlameNode&& other) noexcept = delete;
     FlameNode& operator=(FlameNode&& other) noexcept = delete;
@@ -450,14 +465,14 @@ struct FlameNode {
         }
     }
 
-    FlameNode* get_or_create_child(const Frame& child_frame) {
+    FlameNode* get_or_create_child(const Frame* child_frame) {
         auto it = children.find(child_frame);
         if (it != children.end()) { // 已经存在
             return it->second;
         }
 
         // 尚不存在
-        auto new_node = new FlameNode(child_frame);
+        FlameNode* new_node = new FlameNode(child_frame);
         new_node->parent = this;          // 设置父指针
         children[child_frame] = new_node; // 现在当前节点多了一个子节点了
 
@@ -527,7 +542,13 @@ struct FlameNode {
     std::string to_json_string() const {
         std::ostringstream oss;
         oss << "{";
-        oss << "\"name\":\"" << frame << "\",";
+        oss << "\"name\":\"";
+        if (frame == nullptr) {
+            oss << "root";
+        } else {
+            oss << *frame;
+        }
+        oss << "\",";
         oss << "\"value\":" << total_count;
 
         if (! children.empty()) {
@@ -923,26 +944,61 @@ struct StackCollapseOptions {
     size_t min_count_threshold = 1;           // 最小计数阈值
 };
 
-struct CollapsedStack {
-    struct VectorFrameHasher {
-        size_t operator()(const std::vector<Frame>& frames) const noexcept {
+struct FramesView {
+    const Frame* frame_arr;
+    size_t size;
+    mutable size_t precomputed_hash = 0;
+
+    FramesView(const std::vector<Frame>& frames) : frame_arr(frames.data()), size(frames.size()) {}
+
+    struct Hasher {
+        size_t operator()(const FramesView& view) const noexcept {
+            return view.computed_hash();
+        }
+    };
+
+    struct Equal {
+        bool operator()(const FramesView& a, const FramesView& b) const noexcept {
+            if (a.size != b.size) return false;
+            for (size_t i = 0; i < a.size; ++i) {
+                if (! (a.frame_arr[i] == b.frame_arr[i])) return false;
+            }
+            return true;
+        }
+    };
+
+    struct Less {
+        bool operator()(const FramesView& a, const FramesView& b) const noexcept {
+            const size_t min_size = std::min(a.size, b.size);
+            for (size_t i = 0; i < min_size; ++i) {
+                if (a.frame_arr[i] < b.frame_arr[i]) return true;
+                if (b.frame_arr[i] < a.frame_arr[i]) return false;
+            }
+            // 所有元素相等，看长度
+            return a.size < b.size;
+        }
+    };
+
+    bool empty() const {
+        return size == 0;
+    }
+
+    size_t computed_hash() const {
+        if (precomputed_hash == 0) {
             size_t hash = 0;
-            for (const auto& f : frames) {
-                size_t combined = Frame::Hasher{}(f);
+            for (size_t i = 0; i < size; ++i) {
+                size_t combined = Frame::Hasher{}(frame_arr[i]);
                 hash ^= combined + 0x9e3779b9 + (hash << 6) + (hash >> 2);
             }
-            return hash;
+            precomputed_hash = hash;
         }
-    };
 
-    struct VectorFrameLess {
-        bool operator()(const std::vector<Frame>& a, const std::vector<Frame>& b) const noexcept {
-            return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
-        }
-    };
+        return precomputed_hash;
+    }
+};
 
-    std::unordered_map<std::vector<Frame>, size_t, VectorFrameHasher> collapsed;
-    // std::map<std::vector<Frame>, size_t, VectorFrameLess> collapsed;
+struct CollapsedStack {
+    std::unordered_map<FramesView, size_t, FramesView::Hasher, FramesView::Equal> collapsed;
 
     bool empty() const {
         return collapsed.empty();
@@ -957,8 +1013,9 @@ class StackCollapser {
         CollapsedStack collapsed_stacks;
 
         for (const auto& sample : samples) {
-            // 统计出现次数
-            collapsed_stacks.collapsed[sample.frames] += sample.count;
+            // 统计出现次数, 使用 view 避免拷贝, 直接引用 samples 的原数据
+            FramesView view{sample.frames};
+            collapsed_stacks.collapsed[view] += sample.count;
         }
 
         return collapsed_stacks;
@@ -975,11 +1032,11 @@ class StackCollapser {
         }
 
         for (const auto& [frames, count] : collapsed_stacks.collapsed) {
-            for (size_t i = 0; i < frames.size(); ++i) {
+            for (size_t i = 0; i < frames.size; ++i) {
                 if (i > 0) {
                     ofs << ';';
                 }
-                ofs << frames[i];
+                ofs << frames.frame_arr[i];
             }
             ofs << ' ' << count << '\n';
         }
@@ -996,14 +1053,14 @@ struct FlameGraphBuildOptions {
 class FlameGraphBuilder {
   public:
     FlameNode* build_tree(const CollapsedStack& folded_stacks, const FlameGraphBuildOptions& options = {}) {
+        auto root = new FlameNode();
 
-        auto root = new FlameNode(Frame("root"));
-
-        for (const auto& [stack_frame, count] : folded_stacks.collapsed) {
-            if (stack_frame.empty()) continue;
+        for (const auto& [stack_frames, count] : folded_stacks.collapsed) {
+            if (stack_frames.empty()) continue;
 
             FlameNode* current = root;
-            for (const auto& frame : stack_frame) {
+            for (size_t i = 0; i < stack_frames.size; i++) {
+                const Frame* frame = &stack_frames.frame_arr[i];
                 current = current->get_or_create_child(frame);
             }
 
@@ -1286,7 +1343,7 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         // 渲染根节点
         double y = imageheight_ - ypad - config_.frame_height;
 
-        render_frame(root, config_.xpad, y, config_.width - 2 * config_.xpad, Frame(""), 0);
+        render_frame(root, config_.xpad, y, config_.width - 2 * config_.xpad, nullptr, 0);
 
         // 递归渲染子节点
         render_children_flamegraph(root, config_.xpad, y, 1, width_per_sample);
@@ -1300,7 +1357,7 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         double y = ypad1 + ypad3;
 
         // 渲染根节点
-        render_frame(root, config_.xpad, y, config_.width - 2 * config_.xpad, Frame(""), 0);
+        render_frame(root, config_.xpad, y, config_.width - 2 * config_.xpad, nullptr, 0);
 
         // 递归渲染子节点
         render_children_icicle(root, config_.xpad, y, 1, width_per_sample);
@@ -1345,12 +1402,14 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         }
     }
 
-    void render_frame(const FlameNode& node, double x, double y, double width, Frame frame, int depth) {
+    void render_frame(const FlameNode& node, double x, double y, double width, const Frame* frame, int depth) {
+        // frame maybe nullptr
+
         // 构建 title（tooltip）
         std::string title = build_frame_title(frame, node.total_count);
 
         // 获取颜色
-        std::string color = get_frame_color(frame.name, depth);
+        std::string color = get_frame_color(frame, depth);
 
         // 开始 g 元素
         svg_content_ << "<g>\n";
@@ -1371,9 +1430,13 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         svg_content_ << "</g>\n";
     }
 
-    std::string build_frame_title(const Frame& frame, size_t samples) {
+    std::string build_frame_title(const Frame* frame, size_t samples) {
         std::ostringstream title;
-        title << frame;
+        if (frame == nullptr) {
+            title << "root";
+        } else {
+            title << *frame;
+        }
 
         if (config_.count_name.empty()) {
             title << " (" << samples << " samples";
@@ -1391,11 +1454,10 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         return title.str();
     }
 
-    std::string get_frame_color(std::string_view func_name, int depth) {
-        if (func_name == "root" && depth == 0) {
-            return "rgb(250,250,250)"; // 根节点用浅色
-        }
+    std::string get_frame_color(const Frame* frame, int depth) {
+        if (frame == nullptr && depth == 0) return "rgb(250,250,250)"; // 根节点用浅色
 
+        std::string_view func_name = frame->name;
         if (func_name == "--" || func_name == "-") {
             return "rgb(240,240,240)"; // 分隔符用灰色
         }

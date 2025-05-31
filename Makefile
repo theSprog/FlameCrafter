@@ -17,6 +17,12 @@ CXXFLAGS += -Werror=uninitialized \
     -Wreturn-local-addr
 
 TBB_LIBS  = -ltbb
+LINK_FLAGS = -labsl_base \
+	-labsl_raw_logging_internal \
+	-labsl_throw_delegate -labsl_raw_hash_set \
+	-labsl_hashtablez_sampler \
+	-labsl_hash \
+	-labsl_synchronization
 
 TARGET = flamegraph_main flamegraph_main_par
 SOURCE = example_main.cpp example_main_par.cpp
@@ -29,10 +35,10 @@ all: $(TARGET)
 
 # Build the example
 flamegraph_main: example_main.cpp $(HEADER)
-	$(CXX) $(CXXFLAGS) -o $@ $<
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LINK_FLAGS)
 
 flamegraph_main_par: example_main_par.cpp $(HEADERS)
-	$(CXX) $(CXXFLAGS) -o $@ $< $(TBB_LIBS)
+	$(CXX) $(CXXFLAGS) -o $@ $< $(TBB_LIBS) $(LINK_FLAGS)
 
 # Run the example
 run: flamegraph_main
