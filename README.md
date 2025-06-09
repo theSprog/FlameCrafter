@@ -10,7 +10,7 @@ A **C++17-powered** tool to generate beautiful, high-performance flamegraphs fro
 No complex build steps or dependencies – just include and go!
 
 ✅ **Modern C++17 Implementation**  
-Using `std::string_view`, parallel algorithms, and efficient data structures.
+Using `std::string_view`, `pmr`, parallel algorithms(todo), and efficient data structures.
 
 ✅ **Parallel Flamegraph Building**  
 Powered by [Intel TBB](https://github.com/oneapi-src/oneTBB)(if TBB avaliable), scales well on multi-core machines.
@@ -93,16 +93,17 @@ int main(int argc, char* argv[]) {
   <img src="bench/benchmark_chart.svg">
 </div>
 
-| Dataset | Perl | inferno | FlameCrafter_Single | FlameCrafter_Parallel |
-|--------:|------:|--------:|----------:|------------:|
-|      10 |   16.4 |      4.9 |        **1.3** |          2.7 |
-|     100 |   23.8 |      6.1 |        **2.5** |          4.3 |
-|     1 K |  104.8 |     16.5 |       **14.0** |         17.7 |
-|    10 K |  852.0 |     **99.6** |      124.0 |        136.3 |
-|   100 K | 4110.9 |    **203.9** |      284.6 |        477.0 |
+| Samples | Perl   | inferno | FlameCrafter_Single |
+|--------:|------: |--------: |----------:|
+|      10 |   29.3 |      9.5 |        **4.1** |
+|     100 |   50.5 |      9.3 |        **5.4** |
+|     1 K |  213.7 |     **26.0** |       28.6 |
+|    10 K | 1779.1 |    **192.2** |      219.9 |
+|   100 K | 7293.8 |    479.5 |      **399.1** |
+|     1 M | 93163.8 |   8335.6 |     **4831.5** |
 
 
-Although not faster than [inferno](https://github.com/jonhoo/inferno) in large dataset(Parallel is not optimize now, `JUST TODO`), **FlameCrafter** offers:
+Although not faster than [inferno](https://github.com/jonhoo/inferno) in some middle dataset(Parallel is not offered now, `JUST TODO`), **FlameCrafter** offers:
 
 * 🏗️ **Header-only simplicity** – no build, no external runtime
 * 🎯 **C++17 efficiency** – tight memory usage and zero-cost abstractions

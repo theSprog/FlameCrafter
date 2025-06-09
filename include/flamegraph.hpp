@@ -10,19 +10,19 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <unordered_map>
-#include <vector>
 #include <algorithm>
 #include <iomanip>
 #include <filesystem>
 #include <stdexcept>
-#include <cassert>
+#include <memory_resource>
 
 #include <sys/mman.h>
 #include <unistd.h>
 #include <fcntl.h>
 
 namespace flamegraph {
+thread_local static inline std::pmr::unsynchronized_pool_resource pool;
+
 class FlameGraphException : public std::runtime_error {
   public:
     explicit FlameGraphException(std::string_view message)
@@ -426,13 +426,13 @@ struct FlameNode {
     const Frame* frame;
     size_t self_count = 0;
     size_t total_count = 0;
-    std::unordered_map<const Frame*, FlameNode*, FramePtrHasher, FramePtrEqual> children;
+    std::pmr::unordered_map<const Frame*, FlameNode*, FramePtrHasher, FramePtrEqual> children;
     FlameNode* parent = nullptr; // 父节点指针
     int height = 1;              // 默认自己在 1 层
 
-    explicit FlameNode() : frame(nullptr) {}
+    explicit FlameNode() : frame(nullptr), children(&pool) {}
 
-    explicit FlameNode(const Frame* frame) : frame(frame) {}
+    explicit FlameNode(const Frame* frame) : frame(frame), children(&pool) {}
 
     // 禁用拷贝/移动构造函数
     FlameNode(FlameNode&& other) noexcept = delete;
@@ -442,28 +442,6 @@ struct FlameNode {
 
     // 不再有递归析构器, 仅仅析构 children 本身, 析构 FlameNode* 时需要手动调用 destroy_tree
     ~FlameNode() = default;
-
-    // 手动实现循环析构
-    void destroy_tree() {
-        // 选择 stack 而不是 queue, DFS 而非 BFS
-        // DFS（stack）峰值为 “树的最大深度”
-        // BFS（queue）峰值为 “树的最大宽度”
-        // 火焰图一般不是很深, 但是非常宽, BFS 会占用大量内存
-        // 而且相邻访问的节点在内存中更可能相近（父子节点通常在相近时间创建）, 缓存更好
-        std::vector<FlameNode*> stk;
-        stk.reserve(128); // 根据实际最大深度估一估
-        stk.push_back(this);
-
-        while (! stk.empty()) {
-            FlameNode* curr = stk.back();
-            stk.pop_back();
-
-            for (auto& [_, child] : curr->children) {
-                if (child) stk.push_back(child);
-            }
-            delete curr;
-        }
-    }
 
     FlameNode* get_or_create_child(const Frame* child_frame) {
         auto it = children.find(child_frame);
@@ -588,6 +566,33 @@ struct FlameNode {
     }
 };
 
+struct FlameNodeRoot {
+    FlameNode* node;
+
+    FlameNodeRoot(FlameNode* node) : node(node) {}
+
+    ~FlameNodeRoot() {
+        // 选择 stack 而不是 queue, DFS 而非 BFS
+        // DFS（stack）峰值为 “树的最大深度”
+        // BFS（queue）峰值为 “树的最大宽度”
+        // 火焰图一般不是很深, 但是非常宽, BFS 会占用大量内存
+        // 而且相邻访问的节点在内存中更可能相近（父子节点通常在相近时间创建）, 缓存更好
+        std::vector<FlameNode*> stk;
+        stk.reserve(128); // 根据实际最大深度估一估
+        stk.push_back(node);
+
+        while (! stk.empty()) {
+            FlameNode* curr = stk.back();
+            stk.pop_back();
+
+            for (auto& [_, child] : curr->children) {
+                if (child) stk.push_back(child);
+            }
+            delete curr;
+        }
+    }
+};
+
 struct FlameGraphConfig {
     // 标题和说明
     std::string_view title = "Flame Graph";
@@ -656,30 +661,66 @@ struct FlameGraphConfig {
     }
 };
 
-struct StackSample {
-    std::vector<Frame> frames;
-    size_t count = 1;
-    std::string_view process_name;
-    uint64_t timestamp = 0;
+class StackSamplesContext {
+  private:
+    std::pmr::monotonic_buffer_resource samples_mono;
+    std::pmr::monotonic_buffer_resource frames_mono;
 
-    StackSample() {
-        frames.reserve(16);
+  public:
+    struct StackSample {
+        std::pmr::vector<Frame> frames;
+        size_t count = 1;
+        std::string_view process_name;
+        uint64_t timestamp = 0;
+
+        StackSample(std::pmr::monotonic_buffer_resource& mono) : frames(&mono) {
+            frames.reserve(16);
+        }
+
+        bool is_valid() const {
+            return ! frames.empty() && count > 0;
+        }
+    };
+
+    struct StackSamples {
+        std::pmr::vector<StackSample> raw_samples;
+
+        StackSamples(std::pmr::monotonic_buffer_resource& mono) : raw_samples(&mono) {}
+
+        bool empty() const {
+            return raw_samples.empty();
+        }
+
+        // 只有合法的 sample 才会被 push, 并且是移动资源
+        void move_valid_sample(StackSample& sample) {
+            if (! sample.frames.empty()) {
+                std::reverse(sample.frames.begin(), sample.frames.end());
+                if (sample.is_valid()) {
+                    raw_samples.push_back(std::move(sample));
+                }
+            }
+        }
+    };
+
+    // 创建 StackSamples
+    StackSamples create_samples() {
+        return StackSamples(this->samples_mono);
     }
 
-    StackSample(std::vector<Frame> stack_frames, size_t sample_count = 1)
-        : frames(std::move(stack_frames)), count(sample_count) {}
-
-    bool is_valid() const {
-        return ! frames.empty() && count > 0;
+    StackSample create_sample() {
+        return StackSample(this->frames_mono);
     }
-};
+}; // 析构时自动释放所有内存
+
+using StackSamples = StackSamplesContext::StackSamples;
+using StackSample = StackSamplesContext::StackSample;
 
 // 🔥 ===== 解析器基类和实现 =====
 class AbstractStackParser {
   public:
     virtual ~AbstractStackParser() = default;
 
-    virtual std::vector<StackSample> parse(std::string_view buffer) = 0;
+    virtual StackSamples parse(std::string_view buffer, StackSamplesContext& sample_ctx) = 0;
     virtual std::string_view get_parser_name() const = 0;
 };
 
@@ -688,9 +729,9 @@ class AbstractStackParser {
  */
 class PerfScriptParser : public AbstractStackParser {
   public:
-    std::vector<StackSample> parse(std::string_view buffer) override {
-        std::vector<StackSample> samples;
-        StackSample current_sample;
+    StackSamples parse(std::string_view buffer, StackSamplesContext& sample_ctx) override {
+        StackSamples samples = sample_ctx.create_samples();
+        StackSample current_sample = sample_ctx.create_sample();
         bool reading_stack = false;
         LineScanner scanner(buffer);
 
@@ -700,7 +741,7 @@ class PerfScriptParser : public AbstractStackParser {
 
             if (trimmed_line.empty()) { // 空行：当前 stack 结束
                 if (reading_stack) {
-                    push_valid_sample(samples, current_sample);
+                    samples.move_valid_sample(current_sample);
                 }
                 reading_stack = false;
             } else { // 非空行：做解析
@@ -710,7 +751,7 @@ class PerfScriptParser : public AbstractStackParser {
 
         // 文件结束后，最后一个样本（如果有）
         if (reading_stack) {
-            push_valid_sample(samples, current_sample);
+            samples.move_valid_sample(current_sample);
         }
 
         if (samples.empty()) {
@@ -726,17 +767,6 @@ class PerfScriptParser : public AbstractStackParser {
 
   private:
     friend class ParallelPerfScriptParser;
-
-    // 只有合法的 sample 才会被 push
-    static void push_valid_sample(std::vector<StackSample>& samples, StackSample& current_sample) {
-        if (! current_sample.frames.empty()) {
-            std::reverse(current_sample.frames.begin(), current_sample.frames.end());
-            if (current_sample.is_valid()) {
-                samples.push_back(std::move(current_sample));
-            }
-            current_sample = StackSample();
-        }
-    }
 
     static void parse_line(std::string_view line_view, StackSample& current_sample, bool& reading_stack) {
         if (! reading_stack && line_view.find(':') != std::string::npos) {
@@ -797,7 +827,7 @@ class PerfScriptParser : public AbstractStackParser {
 
         if (paren_start != std::string::npos && paren_end != std::string::npos) {
             lib_name = content.substr(paren_start + 1, paren_end - paren_start - 1);
-            func_name = trim(content.substr(0, paren_start));
+            func_name = content.substr(0, paren_start - 1);
         } else {
             func_name = content;
         }
@@ -835,9 +865,9 @@ class PerfScriptParser : public AbstractStackParser {
  */
 class GenericTextParser : public AbstractStackParser {
   public:
-    std::vector<StackSample> parse(std::string_view buffer) override {
-        std::vector<StackSample> samples;
-        std::vector<Frame> current_stacks;
+    StackSamples parse(std::string_view buffer, StackSamplesContext& sample_ctx) override {
+        StackSamples samples = sample_ctx.create_samples();
+        StackSample current_sample = sample_ctx.create_sample();
         LineScanner scanner(buffer);
 
         while (true) {
@@ -845,21 +875,20 @@ class GenericTextParser : public AbstractStackParser {
             if (line.empty() && scanner.eof()) break;
 
             // 跳过空行和注释
-            if (line.empty() || line[0] == '#') {
-                if (! current_stacks.empty()) {
-                    samples.emplace_back(std::move(current_stacks));
-                    current_stacks.clear();
-                }
-                continue;
+            if (! line.empty() && line[0] != '#') {
+                // 非空、非注释，拷贝到 stack（因为外部仍然需要所有权）
+                current_sample.frames.emplace_back(line);
             }
 
-            // 非空、非注释，拷贝到 stack（因为外部仍然需要所有权）
-            current_stacks.emplace_back(line);
+            // 对于空行或者注释视为一个 sample 的结束
+            if (! current_sample.frames.empty()) {
+                samples.move_valid_sample(current_sample);
+            }
         }
 
         // 文件结束后，最后一个 stack（如果有）
-        if (! current_stacks.empty()) {
-            samples.emplace_back(std::move(current_stacks));
+        if (! current_sample.frames.empty()) {
+            samples.move_valid_sample(current_sample);
         }
 
         return samples;
@@ -876,13 +905,13 @@ class AutoDetectParser : public AbstractStackParser {
     static constexpr int MAX_PREVIEW_LINE = 128;
 
   public:
-    std::vector<StackSample> parse(std::string_view buffer) override {
+    StackSamples parse(std::string_view buffer, StackSamplesContext& sample_ctx) override {
         detect_format(buffer);
         if (! actual_parser_) {
             throw ParseException(std::string("Unable to detect file format for: ") + buffer.data());
         }
 
-        return actual_parser_->parse(buffer);
+        return actual_parser_->parse(buffer, sample_ctx);
     }
 
     std::string_view get_parser_name() const override {
@@ -949,7 +978,7 @@ struct FramesView {
     size_t size;
     mutable size_t precomputed_hash = 0;
 
-    FramesView(const std::vector<Frame>& frames) : frame_arr(frames.data()), size(frames.size()) {}
+    FramesView(const std::pmr::vector<Frame>& frames) : frame_arr(frames.data()), size(frames.size()) {}
 
     struct Hasher {
         size_t operator()(const FramesView& view) const noexcept {
@@ -998,7 +1027,9 @@ struct FramesView {
 };
 
 struct CollapsedStack {
-    std::unordered_map<FramesView, size_t, FramesView::Hasher, FramesView::Equal> collapsed;
+    std::pmr::unordered_map<FramesView, size_t, FramesView::Hasher, FramesView::Equal> collapsed;
+
+    CollapsedStack() : collapsed(&pool) {}
 
     bool empty() const {
         return collapsed.empty();
@@ -1008,11 +1039,12 @@ struct CollapsedStack {
 class StackCollapser {
   public:
     // 折叠堆栈: 读入样本，生成 folded 文件数据
-    CollapsedStack collapse(const std::vector<StackSample>& samples, const StackCollapseOptions& options = {}) {
+    CollapsedStack collapse(const StackSamples& samples,
+                            const StackCollapseOptions& options = {}) {
         (void)options;
         CollapsedStack collapsed_stacks;
 
-        for (const auto& sample : samples) {
+        for (const auto& sample : samples.raw_samples) {
             // 统计出现次数, 使用 view 避免拷贝, 直接引用 samples 的原数据
             FramesView view{sample.frames};
             collapsed_stacks.collapsed[view] += sample.count;
@@ -1053,7 +1085,7 @@ struct FlameGraphBuildOptions {
 class FlameGraphBuilder {
   public:
     FlameNode* build_tree(const CollapsedStack& folded_stacks, const FlameGraphBuildOptions& options = {}) {
-        auto root = new FlameNode();
+        auto root = new FlameNode;
 
         for (const auto& [stack_frames, count] : folded_stacks.collapsed) {
             if (stack_frames.empty()) continue;
@@ -1086,7 +1118,7 @@ class FlameGraphRenderer {
     }
 
   public:
-    virtual void render(const FlameNode& root, std::string_view output_file) = 0;
+    virtual void render(const FlameNodeRoot& root, std::string_view output_file) = 0;
     virtual ~FlameGraphRenderer() = default;
 };
 
@@ -1094,7 +1126,7 @@ class HtmlFlameGraphRenderer : public FlameGraphRenderer {
   public:
     explicit HtmlFlameGraphRenderer(const FlameGraphConfig& config = {}) : FlameGraphRenderer(config) {}
 
-    void render(const FlameNode& root, std::string_view output_file) override {
+    void render(const FlameNodeRoot& root, std::string_view output_file) override {
         auto d3_css = read_relative_file("d3/d3-flamegraph.css");
         auto d3_js = read_relative_file("d3/d3.v7.min.js");
         auto flamegraph_js = read_relative_file("d3/d3-flamegraph.js");
@@ -1124,7 +1156,7 @@ class HtmlFlameGraphRenderer : public FlameGraphRenderer {
   </script>
   <script>
     const rawData = )"
-            << root.to_json_string() << R"(;
+            << root.node->to_json_string() << R"(;
 
     const flameGraph = flamegraph()
       .width(1200)
@@ -1160,12 +1192,12 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         setup_color_scheme();
     }
 
-    void render(const FlameNode& root, std::string_view output_file) override {
-        if (root.total_count == 0) {
+    void render(const FlameNodeRoot& root, std::string_view output_file) override {
+        if (root.node->total_count == 0) {
             throw RenderException("Root node has no samples to render");
         }
-        total_samples_ = root.total_count;
-        max_depth_ = root.height;
+        total_samples_ = root.node->total_count;
+        max_depth_ = root.node->height;
         // 计算图像高度
         imageheight_ = calculate_image_height(max_depth_);
 
@@ -1175,7 +1207,7 @@ class SvgFlameGraphRenderer : public FlameGraphRenderer {
         }
 
         // 写入 svg
-        write_svg(root);
+        write_svg(*root.node);
 
         if (! svg_content_.good()) {
             throw RenderException(std::string("Error writing to SVG file: ") + output_file.data());
@@ -1521,7 +1553,8 @@ class FlameGraphGenerator {
             MMapBuffer buffer(raw_file);
 
             // 解析原始数据
-            std::vector<StackSample> samples = parser->parse(buffer.view());
+            StackSamplesContext sample_ctx;
+            StackSamples samples = parser->parse(buffer.view(), sample_ctx);
 
             if (samples.empty()) {
                 throw FlameGraphException("No valid samples found in input file");
@@ -1541,15 +1574,13 @@ class FlameGraphGenerator {
             // 构建树
             build_opts_.max_depth = config_.max_depth;
             build_opts_.prune_threshold = config_.min_heat_threshold;
-            FlameNode* root = builder.build_tree(collapsed, build_opts_);
+            FlameNodeRoot root = builder.build_tree(collapsed, build_opts_);
 
-            if (root->total_count == 0) {
+            if (root.node->total_count == 0) {
                 throw FlameGraphException("Tree has no samples");
             }
 
-            renderer->render(*root, out_file);
-
-            root->destroy_tree();
+            renderer->render(root, out_file);
         } catch (const std::exception& e) {
             throw FlameGraphException(e.what());
         }

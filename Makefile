@@ -17,12 +17,13 @@ CXXFLAGS += -Werror=uninitialized \
     -Wreturn-local-addr
 
 TBB_LIBS  = -ltbb
-LINK_FLAGS = -labsl_base \
-	-labsl_raw_logging_internal \
-	-labsl_throw_delegate -labsl_raw_hash_set \
-	-labsl_hashtablez_sampler \
-	-labsl_hash \
-	-labsl_synchronization
+LINK_FLAGS = 
+# LINK_FLAGS = -labsl_base \
+# 	-labsl_raw_logging_internal \
+# 	-labsl_throw_delegate -labsl_raw_hash_set \
+# 	-labsl_hashtablez_sampler \
+# 	-labsl_hash \
+# 	-labsl_synchronization
 
 TARGET = flamegraph_main flamegraph_main_par
 SOURCE = example_main.cpp example_main_par.cpp

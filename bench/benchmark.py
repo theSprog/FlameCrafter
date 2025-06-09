@@ -36,9 +36,8 @@ console = Console()
 
 TOOLS: Dict[str, str] = {
     "Perl": "stackcollapse-perf.pl {input} | flamegraph.pl > {output}",
-    "inferno": "inferno-collapse-perf {input} > inferno.folded && inferno-flamegraph inferno.folded > {output}",
+    "inferno": "inferno-collapse-perf {input} | inferno-flamegraph > {output}",
     "FlameCrafter_Single": "./flamegraph_main {input} {output}",
-    "FlameCrafter_Parallel": "./flamegraph_main_par {input} {output}",
 }
 
 DATASETS: List[tuple] = [
@@ -47,10 +46,10 @@ DATASETS: List[tuple] = [
     ("medium", 1_000, "1 K"),
     ("large", 10_000, "10 K"),
     ("huge", 1_000_00, "100 K"),
-    # ("gigantic", 10_000_00, "1 M"),
+    ("gigantic", 10_000_00, "1 M"),
 ]
 
-HYPERFINE_COMMON = ["--warmup", "3", "--runs", "10", "--ignore-failure", "--show-output"]
+HYPERFINE_COMMON = ["--warmup", "2", "--runs", "5", "--ignore-failure", "--show-output"]
 
 
 def save_bar_chart(rows, outfile: str = "benchmark_chart.svg"):
@@ -58,8 +57,8 @@ def save_bar_chart(rows, outfile: str = "benchmark_chart.svg"):
     rows: [{'tag': '1 K', 'perl': '12.9', 'inferno': '5.3', ...}, ...]
     """
     print(f"📊 Prepare generate chart to {outfile}")
-    tools = ["Perl", "inferno", "FlameCrafter_Single", "FlameCrafter_Parallel"]
-    colors = ["#4E79A7", "#59A14F", "#F28E2B", "#E15759"]
+    tools = ["Perl", "inferno", "FlameCrafter_Single"]
+    colors = ["#4E79A7", "#59A14F", "#F28E2B"]
 
     n_rows = len(rows)
     fig, axs = plt.subplots(1, n_rows, figsize=(4 * n_rows, 5), sharey=False)
@@ -71,7 +70,7 @@ def save_bar_chart(rows, outfile: str = "benchmark_chart.svg"):
     for idx, row in enumerate(rows):
         ax = axs[idx]
         x_indexes = np.arange(len(tools))
-        values = [float(row.get(t, "nan")) for t in tools]
+        values = [float(row.get(t, "0")) for t in tools]
 
         bars = ax.bar(x_indexes, values, color=colors, width=0.6)
 
@@ -106,11 +105,10 @@ def save_bar_chart(rows, outfile: str = "benchmark_chart.svg"):
 def show_tables(rows):
     # ── Rich 表格 ────────────────────────────────
     t = Table(title="Flame-graph Benchmark (mean, ms)", show_lines=True)
-    t.add_column("Dataset", justify="right")
+    t.add_column("Samples", justify="right")
     t.add_column("Perl", justify="right")
     t.add_column("inferno", justify="right")
     t.add_column("FlameCrafter_Single", justify="right")
-    t.add_column("FlameCrafter_Parallel", justify="right")
 
     for row in rows:
         t.add_row(
@@ -118,19 +116,18 @@ def show_tables(rows):
             row.get("Perl", "—"),
             row.get("inferno", "—"),
             row.get("FlameCrafter_Single", "—"),
-            row.get("FlameCrafter_Parallel", "—"),
         )
     console.print(t)
 
     # ── Markdown 输出 ────────────
     md = [
-        "| Dataset | Perl | inferno | FlameCrafter_Single | FlameCrafter_Parallel |",
-        "|--------:|------:|--------:|----------:|------------:|",
+        "| Samples | Perl | inferno | FlameCrafter_Single |",
+        "|--------:|------:|--------:|----------:|",
     ]
     for r in rows:
         md.append(
-            f"| {r['tag']:>7} | {r.get('Perl', '—'):>6} | {r.get('inferno', '—'):>8} | "
-            f"{r.get('FlameCrafter_Single', '—'):>10} | {r.get('FlameCrafter_Parallel', '—'):>12} |"
+            f"| {r['tag']:>7} | {r.get('Perl', '—'):>6} | {r.get('inferno', '—'):>8} | " 
+            f"{r.get('FlameCrafter_Single', '—'):>10} |"
         )
 
     with open("benchmark_result.md", "w") as f:
